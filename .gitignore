@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Crash dumps. FreeBSD's kern.corefile defaults to %N.core in the working
+# directory, so a tool that dies mid-command drops one straight into the repo.
+*.core
+
+# Test caches
+.pytest_cache/
