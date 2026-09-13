@@ -249,3 +249,79 @@ class SpecRoundTripTestCase(unittest.TestCase):
         self.machine._write_spec(make_spec(uuid="aaaa"))
         os.makedirs(os.path.join(self.tmp.name, "bbbb"))
         self.assertEqual(["aaaa"], self.machine.list_uuids())
+
+
+class StartTestCase(unittest.TestCase):
+    """start() does not return until the guest is really running."""
+
+    def setUp(self):
+        """Create a defined instance and stub out the privileged calls."""
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        CONF.set_override("instances_path", self.tmp.name)
+        self.addCleanup(CONF.clear_override, "instances_path")
+        self.uuid = "11111111-2222-3333-4444-555555555555"
+        self.dir = os.path.join(self.tmp.name, self.uuid)
+        os.makedirs(self.dir)
+        self.machine = direct.DirectMachine()
+        with mock.patch.object(direct.shutil, "copyfile"):
+            self.machine._write_spec(make_spec(uuid=self.uuid))
+        self.start_domain = mock.patch.object(direct.privsep, "start_domain").start()
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.object(self.machine, "_await_nics").start()
+        mock.patch.object(direct.time, "sleep").start()
+
+    def _write(self, name, text):
+        """Write a state file into the instance directory."""
+        with open(os.path.join(self.dir, name), "w") as handle:
+            handle.write(text)
+
+    def test_start_waits_for_a_live_pid(self):
+        """start() returns once the pidfile names a live process."""
+
+        # the supervisor writes the pidfile some time after start_domain
+        # returns, so it only appears once start() has slept on a poll
+        def supervisor_catches_up(_seconds):
+            self._write("bhyve.pid", "%d\n" % os.getpid())
+
+        direct.time.sleep.side_effect = supervisor_catches_up
+        self.machine.start(self.uuid)
+        self.start_domain.assert_called_once()
+        direct.time.sleep.assert_called_once()
+
+    def test_start_raises_when_the_guest_exits(self):
+        """A verdict appearing during the wait means the boot failed."""
+
+        def exited(*_args, **_kwargs):
+            self._write("exit.status", "exit 4\n")
+
+        self.start_domain.side_effect = exited
+        with self.assertRaises(direct.exception.MachineError) as ctx:
+            self.machine.start(self.uuid)
+        self.assertIn("exited while starting", str(ctx.exception))
+
+    def test_start_raises_on_timeout(self):
+        """No pid and no verdict before the deadline raises."""
+        clock = iter([0, 0, direct.START_WAIT_SECONDS + 1])
+        with mock.patch.object(direct.time, "time", lambda: next(clock)):
+            with self.assertRaises(direct.exception.MachineError) as ctx:
+                self.machine.start(self.uuid)
+        self.assertIn("did not start", str(ctx.exception))
+
+    def test_start_clears_the_previous_verdict(self):
+        """A stale verdict from the last run must not fail this start."""
+        self._write("exit.status", "poweroff\n")
+        self._write("bhyve.pid", "%d\n" % os.getpid())
+        # the pidfile above is "live" so state() reads RUNNING on the first
+        # poll, but start() must first unlink the old verdict or the early
+        # RUNNING check would have returned before launching. remove it
+        # for that check only.
+        os.unlink(os.path.join(self.dir, "bhyve.pid"))
+
+        def launched(*_args, **_kwargs):
+            self._write("bhyve.pid", "%d\n" % os.getpid())
+
+        self.start_domain.side_effect = launched
+        self.machine.start(self.uuid)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "exit.status")))
