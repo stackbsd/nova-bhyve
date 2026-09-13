@@ -32,6 +32,10 @@ CLEAN_EXITS = ("poweroff", "halted")
 
 STOP_POLL = 1.0
 
+# how long to wait after launching the supervisor for bhyve to be running
+START_WAIT_SECONDS = 30
+START_POLL = 0.2
+
 # TODO: should these all be CONF items? (vnc + nic wait)
 VNC_PORT_BASE = 5900
 FBUF_SLOT = 29
@@ -302,6 +306,12 @@ class DirectMachine(machine.Machine):
         # expect the l2 agent create them for us
         self._await_nics(spec)
 
+        # clear exit status from previous run
+        try:
+            os.unlink(os.path.join(directory, EXIT_STATUS))
+        except FileNotFoundError:
+            pass
+
         argv = self._build_argv(spec)
         LOG.info("starting %s", uuid)
         LOG.debug(
@@ -311,6 +321,26 @@ class DirectMachine(machine.Machine):
         privsep.start_domain(
             directory, uuid, argv, console_log=os.path.join(directory, CONSOLE_LOG)
         )
+        self._wait_for_running(uuid)
+
+    def _wait_for_running(self, uuid):
+        """Wait for the instance to be running."""
+        deadline = time.time() + START_WAIT_SECONDS
+        while True:
+            state, reason = self.state(uuid)
+            if state == power_state.RUNNING:
+                return
+            if self._read_exit(uuid) is not None:
+                raise exception.MachineError(
+                    uuid=uuid,
+                    reason="exited while starting (%s)" % reason,
+                )
+            if time.time() > deadline:
+                raise exception.MachineError(
+                    uuid=uuid,
+                    reason="did not start in %ss" % START_WAIT_SECONDS,
+                )
+            time.sleep(START_POLL)
 
     def shutdown(self, uuid, timeout):
         """Request an instance stop, destroy after timeout."""
