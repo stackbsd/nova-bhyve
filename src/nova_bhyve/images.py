@@ -19,6 +19,8 @@ CONF = conf.CONF
 
 BASE_SNAPSHOT = "base"
 
+LOCK_PREFIX = "nova-bhyve-image-"
+
 SUPPORTED_FORMATS = ("raw", "qcow2")
 SNAPSHOT_FORMATS = ("raw", "qcow2")
 
@@ -255,6 +257,26 @@ def is_cached(image_id):
     )
 
 
+def get_cached_images():
+    """Return the id of every image with a cache zvol."""
+    return [os.path.basename(d) for d in zfs.get_volumes(zfs.images_dataset())]
+
+
+def is_inuse(image_id):
+    """Check if any zvol is cloned from an image's cache entry."""
+    return is_cached(image_id) and bool(zfs.clones_of(base_snapshot(image_id)))
+
+
+def remove_image(image_id):
+    """Remove an image from the cache and report whether it was removed."""
+    with lockutils.lock(LOCK_PREFIX + image_id, external=True):
+        # recheck under the lock as a spawn may have cloned it since
+        if is_inuse(image_id):
+            return False
+        destroy_cache(image_id)
+        return True
+
+
 def destroy_cache(image_id):
     """Remove an image from the cache."""
     zfs.destroy_deferred(base_snapshot(image_id))
@@ -264,7 +286,7 @@ def destroy_cache(image_id):
 def ensure_cached(context, image_meta, flavor_bytes=None):
     """Populate the image cache if needed and return ``(base_snapshot, virtual_size)``."""
     image_id = image_meta.id
-    with lockutils.lock("nova-bhyve-image-%s" % image_id, external=True):
+    with lockutils.lock(LOCK_PREFIX + image_id, external=True):
         if is_cached(image_id):
             virtual_size = zfs.volsize_bytes(image_dataset(image_id))
             LOG.info(

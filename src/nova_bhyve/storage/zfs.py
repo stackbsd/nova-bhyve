@@ -201,6 +201,12 @@ def snapshots_of(dataset):
     return out.split()
 
 
+def get_volumes(dataset):
+    """Return the zvols directly under a dataset."""
+    out = run("list", "-H", "-o", "name", "-t", "volume", "-d", "1", dataset)
+    return out.split()
+
+
 def clones_of(snapshot_name):
     """Return the datasets cloned from a snapshot."""
     out = run(
