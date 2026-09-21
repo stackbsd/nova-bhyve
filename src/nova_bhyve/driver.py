@@ -22,7 +22,7 @@ from oslo_utils import fileutils, timeutils, units
 from nova import exception as nova_exception
 from nova.virt import configdrive, driver, hardware
 from nova_bhyve import conf as bhyve_conf
-from nova_bhyve import exception, images
+from nova_bhyve import exception, imagecache, images
 from nova_bhyve import machine as machine_pkg
 from nova_bhyve.storage import zfs
 
@@ -202,7 +202,7 @@ class BhyveDriver(driver.ComputeDriver):
     """Runs instances as bhyve VMs."""
 
     capabilities: typing.ClassVar[dict] = {
-        "has_imagecache": False,
+        "has_imagecache": True,
         "supports_evacuate": False,
         "supports_migrate_to_same_host": True,
         "supports_attach_interface": True,
@@ -243,6 +243,7 @@ class BhyveDriver(driver.ComputeDriver):
         """Select the configured mechanism and record the node name."""
         super().__init__(virtapi)
         self._machine = machine_pkg.get_machine()
+        self._image_cache_manager = imagecache.ImageCacheManager()
         self._nodename = CONF.host
 
     @log_call
@@ -753,6 +754,11 @@ class BhyveDriver(driver.ComputeDriver):
                 )
 
     @log_call
+    def manage_image_cache(self, context, all_instances):
+        """Remove cached images that are no longer used."""
+        self._image_cache_manager.update(context, all_instances)
+
+    @log_call
     def migrate_disk_and_power_off(
         self,
         context,
@@ -947,7 +953,7 @@ class BhyveDriver(driver.ComputeDriver):
 
     @unsupported
     def cache_image(self, *args, **kwargs):
-        """Nova's image cache manager is unsupported."""
+        """Image pre-caching is unsupported."""
 
     @unsupported
     def live_migration(self, *args, **kwargs):
@@ -1100,10 +1106,6 @@ class BhyveDriver(driver.ComputeDriver):
     @unsupported
     def set_host_enabled(self, *args, **kwargs):
         """Host availability is unsupported."""
-
-    @unsupported
-    def manage_image_cache(self, *args, **kwargs):
-        """Nova's image cache manager is unsupported."""
 
     @unsupported
     def quiesce(self, *args, **kwargs):
