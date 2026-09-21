@@ -14,11 +14,11 @@ An OpenStack Nova compute driver that runs instances as [bhyve](https://bhyve.or
 - Cold attach of cinder volumes
 - Cold attach of network interfaces
 - Instance snapshot and upload to Glance
+- Unused cached images removed by Nova's image cache manager
 
 ### Roadmap
 
 - Cold migration between hosts (currently only supports same-host migration i.e. instance resize)
-- Automatically remove cached images once last instance is gone
 - Support for additional ephemeral/swap disks
 
 ### Limitations
