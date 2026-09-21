@@ -12,11 +12,11 @@ An OpenStack Nova compute driver that runs instances as [bhyve](https://bhyve.or
 - Glance images cached as zvols with zero copy root disk cloning
 - VNC console integration through `nova-novncproxy`
 - Cold attach of cinder volumes
+- Cold attach of network interfaces
 - Instance snapshot and upload to Glance
 
 ### Roadmap
 
-- Cold attach of network interfaces
 - Cold migration between hosts (currently only supports same-host migration i.e. instance resize)
 - Automatically remove cached images once last instance is gone
 - Support for additional ephemeral/swap disks

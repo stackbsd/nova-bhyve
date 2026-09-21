@@ -132,30 +132,35 @@ def disk_spec(connection_info, mountpoint):
     )
 
 
+def tap_name(vif):
+    """Return the name of the tap backing a vif."""
+    # driver expects the l2 agent to create the taps with this name
+    return "tap" + vif["id"][:11]
+
+
+def nic_spec(vif):
+    """Turn a vif into NicSpec."""
+    if vif.get("type") != "bridge":
+        raise exception.BhyveDriverError(
+            reason="port %(port)s has vif_type %(type)s; this driver "
+            "only supports bridge vifs"
+            % {"port": vif.get("id"), "type": vif.get("type")}
+        )
+    details = vif.get("details") or {}
+    bridge = details.get("bridge_name")
+    if not bridge:
+        raise exception.BhyveDriverError(
+            reason="port %s carries no bridge_name in its vif_details; "
+            "is the Neutron mechanism driver bound to it?" % vif.get("id")
+        )
+    return machine_pkg.NicSpec(
+        tap_name=tap_name(vif), bridge=bridge, mac=vif["address"]
+    )
+
+
 def nic_specs(network_info):
     """Turn network_info into NicSpec."""
-    nics = []
-    for vif in network_info or []:
-        if vif.get("type") != "bridge":
-            raise exception.BhyveDriverError(
-                reason="port %(port)s has vif_type %(type)s; this driver "
-                "only supports bridge vifs"
-                % {"port": vif.get("id"), "type": vif.get("type")}
-            )
-        details = vif.get("details") or {}
-        bridge = details.get("bridge_name")
-        if not bridge:
-            raise exception.BhyveDriverError(
-                reason="port %s carries no bridge_name in its vif_details; "
-                "is the Neutron mechanism driver bound to it?" % vif.get("id")
-            )
-        nics.append(
-            # driver expects the l2 agent to create the taps with this name
-            machine_pkg.NicSpec(
-                tap_name="tap" + vif["id"][:11], bridge=bridge, mac=vif["address"]
-            )
-        )
-    return tuple(nics)
+    return tuple(nic_spec(vif) for vif in network_info or [])
 
 
 def sysctl(name):
@@ -200,7 +205,7 @@ class BhyveDriver(driver.ComputeDriver):
         "has_imagecache": False,
         "supports_evacuate": False,
         "supports_migrate_to_same_host": True,
-        "supports_attach_interface": False,
+        "supports_attach_interface": True,
         "supports_device_tagging": False,
         "supports_tagged_attach_interface": False,
         "supports_tagged_attach_volume": False,
@@ -618,17 +623,17 @@ class BhyveDriver(driver.ComputeDriver):
             "os_type": "freebsd",
         }
 
-    def _refuse_if_running(self, instance, verb):
-        """Refuse a volume operation against a running instance."""
+    def _refuse_if_running(self, instance, verb, device):
+        """Refuse a device operation against a running instance."""
         # only annoying thing with this is that the API accepts the request
         # but then the driver refuses, so from the user perspective nothing
         # happens, no error unless you check the logs
         if self._machine.state(instance.uuid)[0] == power_state.RUNNING:
             raise exception.BhyveDriverError(
-                reason="cannot %(verb)s a volume while %(uuid)s is running as "
-                "bhyve cannot hot-plug disks. Stop the instance, "
-                "%(verb)s the volume, then start it again."
-                % {"verb": verb, "uuid": instance.uuid}
+                reason="cannot %(verb)s a %(device)s while %(uuid)s is "
+                "running. Stop the instance, %(verb)s the %(device)s, then "
+                "start it again."
+                % {"verb": verb, "device": device, "uuid": instance.uuid}
             )
 
     @log_call
@@ -647,7 +652,7 @@ class BhyveDriver(driver.ComputeDriver):
             raise exception.BhyveDriverError(
                 reason="encrypted volumes are not supported"
             )
-        self._refuse_if_running(instance, "attach")
+        self._refuse_if_running(instance, "attach", "volume")
         self._machine.attach_disk(instance.uuid, disk_spec(connection_info, mountpoint))
 
     @log_call
@@ -660,6 +665,17 @@ class BhyveDriver(driver.ComputeDriver):
         self._machine.detach_disk(
             instance.uuid, target_dev(mountpoint, connection_info)
         )
+
+    @log_call
+    def attach_interface(self, context, instance, image_meta, vif):
+        """Attach a Neutron port to a stopped instance."""
+        self._refuse_if_running(instance, "attach", "network interface")
+        self._machine.attach_nic(instance.uuid, nic_spec(vif))
+
+    @log_call
+    def detach_interface(self, context, instance, vif):
+        """Detach a Neutron port from a stopped instance."""
+        self._machine.detach_nic(instance.uuid, tap_name(vif))
 
     @log_call
     def snapshot(self, context, instance, image_id, update_task_state):
@@ -912,14 +928,6 @@ class BhyveDriver(driver.ComputeDriver):
         """Get the host uptime."""
         out, _err = processutils.execute("uptime")
         return out.strip()
-
-    @unsupported
-    def attach_interface(self, *args, **kwargs):
-        """Interface hot-plug is unsupported."""
-
-    @unsupported
-    def detach_interface(self, *args, **kwargs):
-        """Interface hot-plug is unsupported."""
 
     @unsupported
     def swap_volume(self, *args, **kwargs):
