@@ -394,7 +394,7 @@ class DirectMachine(machine.Machine):
 
     def attach_disk(self, uuid, disk):
         """Add a disk to a stopped instance."""
-        spec = self._require_stopped(uuid, "attach")
+        spec = self._require_stopped(uuid, "attach", "disk")
         if any(v.target_dev == disk.target_dev for v in spec.volumes):
             LOG.info(
                 "%(uuid)s already has a disk at "
@@ -423,14 +423,48 @@ class DirectMachine(machine.Machine):
             )
             return
 
-        self._require_stopped(uuid, "detach")
+        self._require_stopped(uuid, "detach", "disk")
         LOG.info(
             "detaching %(target)s from %(uuid)s",
             {"target": target_dev, "uuid": uuid},
         )
         self._write_spec(dataclasses.replace(spec, volumes=kept))
 
-    def _require_stopped(self, uuid, verb):
+    def attach_nic(self, uuid, nic):
+        """Add a network interface to a stopped instance."""
+        spec = self._require_stopped(uuid, "attach", "network interface")
+        if any(n.tap_name == nic.tap_name for n in spec.nics):
+            LOG.info(
+                "%(uuid)s already has %(tap)s",
+                {"uuid": uuid, "tap": nic.tap_name},
+            )
+            return
+        LOG.info(
+            "attaching %(tap)s (%(mac)s) on %(uuid)s",
+            {"tap": nic.tap_name, "mac": nic.mac, "uuid": uuid},
+        )
+        self._write_spec(dataclasses.replace(spec, nics=(*spec.nics, nic)))
+
+    def detach_nic(self, uuid, tap_name):
+        """Remove a network interface from a stopped instance."""
+        spec = self._read_spec(uuid)
+        if spec is None:
+            raise exception.MachineError(uuid=uuid, reason="domain is not defined")
+
+        # check if the nic already got detached
+        kept = tuple(n for n in spec.nics if n.tap_name != tap_name)
+        if len(kept) == len(spec.nics):
+            LOG.info(
+                "%(uuid)s has no nic %(tap)s so nothing to detach",
+                {"uuid": uuid, "tap": tap_name},
+            )
+            return
+
+        self._require_stopped(uuid, "detach", "network interface")
+        LOG.info("detaching %(tap)s from %(uuid)s", {"tap": tap_name, "uuid": uuid})
+        self._write_spec(dataclasses.replace(spec, nics=kept))
+
+    def _require_stopped(self, uuid, verb, device):
         """Get the spec of a stopped instance, or raise."""
         spec = self._read_spec(uuid)
         if spec is None:
@@ -438,9 +472,9 @@ class DirectMachine(machine.Machine):
         if self.state(uuid)[0] == power_state.RUNNING:
             raise exception.MachineError(
                 uuid=uuid,
-                reason="cannot %(verb)s a disk while %(uuid)s is running: "
-                "bhyve cannot hot-plug. Stop the instance, %(verb)s "
-                "the disk, then start it again." % {"verb": verb, "uuid": uuid},
+                reason="cannot %(verb)s a %(device)s while running. Stop the "
+                "instance, %(verb)s the %(device)s, then start it again."
+                % {"verb": verb, "device": device},
             )
         return spec
 

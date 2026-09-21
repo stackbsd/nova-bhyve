@@ -82,6 +82,14 @@ class Machine(metaclass=abc.ABCMeta):
         """Remove a disk from an instance."""
 
     @abc.abstractmethod
+    def attach_nic(self, uuid, nic):
+        """Add a network interface to an instance."""
+
+    @abc.abstractmethod
+    def detach_nic(self, uuid, tap_name):
+        """Remove a network interface from an instance."""
+
+    @abc.abstractmethod
     def plug_nics(self, uuid):
         """Create the instance taps."""
 
