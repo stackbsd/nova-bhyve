@@ -18,7 +18,7 @@ ZVOL_DEV_DIR = "/dev/zvol"
 # zfs create -V needs a multiple of dataset volblocksize
 VOLSIZE_ALIGNMENT = 1024 * 1024
 
-# retry for instance destroy (zvol release is async)
+# retry for destroy and rollback as zvol release is async
 BUSY_ATTEMPTS = 10
 BUSY_BACKOFF = 1.0
 
@@ -271,4 +271,7 @@ def rollback(dataset, name):
     LOG.info(
         "rolling %(dataset)s back to %(snap)s", {"dataset": dataset, "snap": full}
     )
-    run("rollback", full, dataset=full)
+    retry_while_busy(
+        "rolling %s back" % dataset,
+        functools.partial(run, "rollback", full, dataset=full),
+    )

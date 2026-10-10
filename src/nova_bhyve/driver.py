@@ -894,10 +894,7 @@ class BhyveDriver(driver.ComputeDriver):
             if not zfs.exists(snapshot_name):
                 LOG.info("%s has no revert snapshot", zvol)
                 continue
-            zfs.retry_while_busy(
-                "rolling %s back" % zvol,
-                functools.partial(zfs.rollback, zvol, RESIZE_SNAPSHOT),
-            )
+            zfs.rollback(zvol, RESIZE_SNAPSHOT)
             zfs.destroy_deferred(snapshot_name)
         self._sync_local_disks(instance, block_device_info)
 
