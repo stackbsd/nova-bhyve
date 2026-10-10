@@ -47,6 +47,9 @@ BUSY_BACKOFF = 1.0
 SNAPSHOT_PREFIX = "nova-snapshot-"
 RESIZE_SNAPSHOT = "nova-resize"
 
+EPHEMERAL_DISK = "eph%d"
+SWAP_DISK = "swap"
+
 
 # TODO: should describe, log_call, unsupported, tail_file be in a utils module?
 def describe(value):
@@ -176,9 +179,34 @@ def snapshot_datasets(uuid, image_id):
     return "%s@%s" % (dataset, suffix), "%s.%s" % (dataset, suffix)
 
 
-def resize_snapshot(uuid):
-    """Return the name of an instance's resize revert point."""
-    return "%s@%s" % (zfs.instance_dataset(uuid), RESIZE_SNAPSHOT)
+def resize_snapshot(dataset):
+    """Return the name of a zvol's resize revert point."""
+    return "%s@%s" % (dataset, RESIZE_SNAPSHOT)
+
+
+def instance_zvols(uuid):
+    """Return the root, ephemeral and swap zvols of an instance."""
+    return [zfs.instance_dataset(uuid), *zfs.local_disks(uuid)]
+
+
+def wanted_local_disks(instance, block_device_info):
+    """Return (name, size_bytes, target_dev) for each ephemeral and swap disk."""
+    disks = []
+    ephemerals = driver.block_device_info_get_ephemerals(block_device_info)
+    for index, eph in enumerate(ephemerals):
+        name = EPHEMERAL_DISK % index
+        disks.append((name, eph["size"] * units.Gi, eph.get("device_name")))
+    # a resize onto a flavor with ephemeral_gb brings no ephemeral mapping
+    if not ephemerals and instance.flavor.ephemeral_gb:
+        size = instance.flavor.ephemeral_gb * units.Gi
+        disks.append((EPHEMERAL_DISK % 0, size, None))
+    swap = driver.block_device_info_get_swap(block_device_info)
+    disks.append((SWAP_DISK, swap["swap_size"] * units.Mi, swap["device_name"]))
+    return [
+        (name, size, os.path.basename(target or name))
+        for name, size, target in disks
+        if size
+    ]
 
 
 def retry_while_busy(what, step):
@@ -196,6 +224,18 @@ def retry_while_busy(what, step):
                 {"what": what, "n": attempt, "total": BUSY_ATTEMPTS},
             )
             time.sleep(BUSY_BACKOFF)
+
+
+def destroy_zvol(dataset):
+    """Destroy a zvol along with its snapshots and their clones."""
+    for snapshot_name in zfs.snapshots_of(dataset):
+        for clone in zfs.clones_of(snapshot_name):
+            LOG.info("destroying leftover snapshot clone %s", clone)
+            zfs.destroy_volume(clone)
+        zfs.destroy_deferred(snapshot_name)
+    retry_while_busy(
+        "destroying %s" % dataset, functools.partial(zfs.destroy_volume, dataset)
+    )
 
 
 class BhyveDriver(driver.ComputeDriver):
@@ -388,6 +428,8 @@ class BhyveDriver(driver.ComputeDriver):
             if flavor_bytes and flavor_bytes > zfs.volsize_bytes(target):
                 zfs.set_volsize(target, flavor_bytes)
 
+            self._sync_local_disks(instance, block_device_info)
+
             # generate config drive
             if configdrive.required_by(instance):
                 self._make_config_drive(
@@ -432,11 +474,44 @@ class BhyveDriver(driver.ComputeDriver):
             mem_mib=instance.flavor.memory_mb,
             root_dev=zfs.device_path(zfs.instance_dataset(instance.uuid)),
             iso_path=iso_path if os.path.exists(iso_path) else None,
+            local_disks=tuple(
+                machine_pkg.DiskSpec(
+                    device_path=zfs.device_path(
+                        zfs.local_disk_dataset(instance.uuid, name)
+                    ),
+                    target_dev=target,
+                )
+                for name, _size, target in wanted_local_disks(
+                    instance, block_device_info
+                )
+            ),
             volumes=self._boot_volumes(block_device_info),
             nics=nic_specs(network_info),
             vnc_port=(machine_pkg.VNC_PORT_AUTO if CONF.vnc.enabled else None),
         )
         self._machine.define(spec)
+
+    @staticmethod
+    def _sync_local_disks(instance, block_device_info):
+        """Make an instance's ephemeral and swap zvols match its mappings."""
+        uuid = instance.uuid
+        wanted = {
+            name: zfs.align_volsize(size)
+            for name, size, _target in wanted_local_disks(instance, block_device_info)
+        }
+        for dataset in zfs.local_disks(uuid):
+            name = dataset.rsplit(".", 1)[1]
+            size = wanted.get(name)
+            current = zfs.volsize_bytes(dataset)
+            # swap holds nothing worth keeping so a new size means a new zvol
+            if size is None or (name == SWAP_DISK and current != size):
+                destroy_zvol(dataset)
+            elif current < size:
+                zfs.set_volsize(dataset, size)
+        for name, size in wanted.items():
+            dataset = zfs.local_disk_dataset(uuid, name)
+            if not zfs.exists(dataset):
+                zfs.create_volume(dataset, size)
 
     def _make_config_drive(
         self, instance, injected_files, admin_password, network_info
@@ -495,9 +570,14 @@ class BhyveDriver(driver.ComputeDriver):
                 )
 
         if destroy_disks:
-            # need to delete snapshots before the root zvol
-            self._destroy_instance_snapshots(uuid)
-            self._destroy_root_zvol(uuid)
+            for dataset in instance_zvols(uuid):
+                try:
+                    destroy_zvol(dataset)
+                except exception.BhyveDriverError as err:
+                    LOG.warning(
+                        "destroying %(dataset)s of %(uuid)s failed: %(err)s",
+                        {"dataset": dataset, "uuid": uuid, "err": err},
+                    )
 
             # delete the instance dir only if disks are destroyed
             directory = os.path.join(CONF.instances_path, uuid)
@@ -508,38 +588,6 @@ class BhyveDriver(driver.ComputeDriver):
                         os.unlink(entry.path)
                 os.rmdir(directory)
 
-
-    @staticmethod
-    def _destroy_instance_snapshots(uuid):
-        """Remove any snapshots and snapshot clones for an instance."""
-        for snapshot_name in zfs.snapshots_of(zfs.instance_dataset(uuid)):
-            try:
-                for clone in zfs.clones_of(snapshot_name):
-                    LOG.info(
-                        "destroying leftover snapshot clone %s", clone
-                    )
-                    zfs.destroy_volume(clone)
-                zfs.destroy_deferred(snapshot_name)
-            except exception.BhyveDriverError as err:
-                LOG.warning(
-                    "could not remove snapshot %(snap)s "
-                    "of %(uuid)s: %(err)s",
-                    {"snap": snapshot_name, "uuid": uuid, "err": err},
-                )
-
-    @staticmethod
-    def _destroy_root_zvol(uuid):
-        """Destroy an instance root zvol."""
-        dataset = zfs.instance_dataset(uuid)
-        try:
-            retry_while_busy(
-                "destroying %s" % dataset, lambda: zfs.destroy_volume(dataset)
-            )
-        except exception.BhyveDriverError as err:
-            LOG.warning(
-                "destroying the root zvol of %(uuid)s failed: %(err)s",
-                {"uuid": uuid, "err": err},
-            )
 
     @log_call
     def cleanup(
@@ -794,19 +842,34 @@ class BhyveDriver(driver.ComputeDriver):
                 )
             )
 
+        ephemerals = driver.block_device_info_get_ephemerals(block_device_info)
+        ephemeral_gb = (
+            sum(eph["size"] for eph in ephemerals) or instance.flavor.ephemeral_gb
+        )
+        if flavor.ephemeral_gb < ephemeral_gb:
+            raise nova_exception.InstanceFaultRollback(
+                inner_exception=exception.BhyveDriverError(
+                    reason="cannot resize %(uuid)s down to %(new)s GiB of "
+                    "ephemeral disk from %(old)s GiB now, shrinking is not "
+                    "supported"
+                    % {"uuid": uuid, "new": flavor.ephemeral_gb, "old": ephemeral_gb}
+                )
+            )
+
         self._machine.shutdown(uuid, timeout or CONF.bhyve.shutdown_timeout_graceful)
 
-        snapshot_name = resize_snapshot(uuid)
-        if zfs.exists(snapshot_name):
-            LOG.warning(
-                "%s replacing existing resize revert point",
-                snapshot_name,
-            )
-            zfs.destroy_deferred(snapshot_name)
-        zfs.snapshot(dataset, RESIZE_SNAPSHOT)
+        for zvol in instance_zvols(uuid):
+            snapshot_name = resize_snapshot(zvol)
+            if zfs.exists(snapshot_name):
+                LOG.warning(
+                    "%s replacing existing resize revert point",
+                    snapshot_name,
+                )
+                zfs.destroy_deferred(snapshot_name)
+            zfs.snapshot(zvol, RESIZE_SNAPSHOT)
 
         return jsonutils.dumps(
-            {"root_volsize_bytes": current, "revert_snapshot": snapshot_name}
+            {"root_volsize_bytes": current, "revert_snapshot": resize_snapshot(dataset)}
         )
 
     @log_call
@@ -830,6 +893,7 @@ class BhyveDriver(driver.ComputeDriver):
             target = instance.flavor.root_gb * units.Gi
             if target:
                 zfs.set_volsize(zfs.instance_dataset(uuid), target)
+        self._sync_local_disks(instance, block_device_info)
 
         # update definition on disk and power on
         self._define_domain(instance, block_device_info, network_info)
@@ -838,8 +902,9 @@ class BhyveDriver(driver.ComputeDriver):
 
     @log_call
     def confirm_migration(self, context, migration, instance, network_info):
-        """Drop the revert point snapshot for same-host resize."""
-        zfs.destroy_deferred(resize_snapshot(instance.uuid))
+        """Drop the revert point snapshots for same-host resize."""
+        for zvol in instance_zvols(instance.uuid):
+            zfs.destroy_deferred(resize_snapshot(zvol))
 
     @log_call
     def finish_revert_migration(
@@ -853,26 +918,22 @@ class BhyveDriver(driver.ComputeDriver):
     ):
         """Put the instance back exactly as it was before the resize."""
         uuid = instance.uuid
-        dataset = zfs.instance_dataset(uuid)
-        snapshot_name = resize_snapshot(uuid)
 
         # might not be needed but doesn't hurt
         self._machine.shutdown(uuid, CONF.bhyve.shutdown_timeout_graceful)
 
-        if zfs.exists(snapshot_name):
+        # no snapshot means we didnt get that far originally so skip it
+        for zvol in instance_zvols(uuid):
+            snapshot_name = resize_snapshot(zvol)
+            if not zfs.exists(snapshot_name):
+                LOG.info("%s has no revert snapshot", zvol)
+                continue
             retry_while_busy(
-                "rolling %s back" % dataset,
-                lambda: zfs.rollback(dataset, RESIZE_SNAPSHOT),
+                "rolling %s back" % zvol,
+                functools.partial(zfs.rollback, zvol, RESIZE_SNAPSHOT),
             )
             zfs.destroy_deferred(snapshot_name)
-        else:
-            # no snapshot means we didnt get that far originally
-            # safe to continue
-            LOG.warning(
-                "%s has no revert snapshot; "
-                "reverting the domain definition only",
-                uuid,
-            )
+        self._sync_local_disks(instance, block_device_info)
 
         self._define_domain(instance, block_device_info, network_info)
         if power_on:

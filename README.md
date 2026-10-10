@@ -8,6 +8,7 @@ An OpenStack Nova compute driver that runs instances as [bhyve](https://bhyve.or
 
 - Direct VM management through `bhyve`/`bhyvectl`
 - Instance root disks on ZFS
+- Ephemeral and swap disks as sparse zvols
 - Supports booting from qcow2 and raw Glance images
 - Glance images cached as zvols with zero copy root disk cloning
 - VNC console integration through `nova-novncproxy`
@@ -19,11 +20,11 @@ An OpenStack Nova compute driver that runs instances as [bhyve](https://bhyve.or
 ### Roadmap
 
 - Cold migration between hosts (currently only supports same-host migration i.e. instance resize)
-- Support for additional ephemeral/swap disks
 
 ### Limitations
 
 - Live migration is not supported yet by bhyve, so is not implemented in this driver
+- Ephemeral and swap disks are attached unformatted, the guest has to create the filesystem or swap area
 
 ## Host requirements
 

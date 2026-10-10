@@ -71,6 +71,17 @@ def instance_dataset(uuid):
     return "%s/%s" % (instances_dataset(), uuid)
 
 
+def local_disk_dataset(uuid, name):
+    """Return the dataset for an instance ephemeral or swap zvol."""
+    return "%s.disk.%s" % (instance_dataset(uuid), name)
+
+
+def local_disks(uuid):
+    """Return the ephemeral and swap zvols of an instance."""
+    prefix = local_disk_dataset(uuid, "")
+    return [v for v in get_volumes(instances_dataset()) if v.startswith(prefix)]
+
+
 def device_path(dataset):
     """Return the device node of a zvol."""
     return os.path.join(ZVOL_DEV_DIR, dataset)
