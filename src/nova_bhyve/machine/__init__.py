@@ -37,6 +37,7 @@ class MachineSpec:
     mem_mib: int
     root_dev: str
     iso_path: str | None = None
+    local_disks: tuple[DiskSpec, ...] = ()
     volumes: tuple[DiskSpec, ...] = ()
     nics: tuple[NicSpec, ...] = ()
     vnc_port: int | None = None

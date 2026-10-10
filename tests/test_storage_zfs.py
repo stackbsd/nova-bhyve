@@ -133,3 +133,44 @@ class ClonesOfTestCase(unittest.TestCase):
             self.assertEqual(
                 ["tank/nova/b", "tank/nova/c"], zfs.clones_of("tank/nova/a@s")
             )
+
+
+class RollbackTestCase(unittest.TestCase):
+    """Rollback waits out a zvol that is still busy."""
+
+    def setUp(self):
+        """Configure a known root dataset and no backoff."""
+        super().setUp()
+        CONF.set_override("zfs_dataset", "tank/nova", group="bhyve")
+        self.addCleanup(CONF.clear_override, "zfs_dataset", group="bhyve")
+        mock.patch.object(zfs, "BUSY_BACKOFF", 0).start()
+        self.addCleanup(mock.patch.stopall)
+        self.busy = exception.ZFSCommandError(
+            command="rollback", dataset="tank/nova/a@s", reason="dataset is busy"
+        )
+
+    def test_retries_while_busy(self):
+        """A busy rollback is tried again until it succeeds."""
+        with mock.patch.object(zfs, "run", side_effect=[self.busy, ""]) as run:
+            zfs.rollback("tank/nova/a", "s")
+        self.assertEqual(2, run.call_count)
+        run.assert_called_with("rollback", "tank/nova/a@s", dataset="tank/nova/a@s")
+
+    def test_other_errors_are_not_retried(self):
+        """A failure other than busy raises at once."""
+        error = exception.ZFSCommandError(
+            command="rollback", dataset="tank/nova/a@s", reason="no such snapshot"
+        )
+        with mock.patch.object(zfs, "run", side_effect=[error, ""]) as run:
+            self.assertRaises(
+                exception.ZFSCommandError, zfs.rollback, "tank/nova/a", "s"
+            )
+        self.assertEqual(1, run.call_count)
+
+    def test_gives_up_after_the_last_attempt(self):
+        """A zvol busy on every attempt raises."""
+        with mock.patch.object(zfs, "run", side_effect=self.busy) as run:
+            self.assertRaises(
+                exception.ZFSCommandError, zfs.rollback, "tank/nova/a", "s"
+            )
+        self.assertEqual(zfs.BUSY_ATTEMPTS, run.call_count)

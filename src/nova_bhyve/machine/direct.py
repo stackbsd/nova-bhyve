@@ -133,9 +133,12 @@ class DirectMachine(machine.Machine):
                 raw = json.load(handle)
         except (OSError, ValueError):
             return None
+        local_disks = tuple(machine.DiskSpec(**d) for d in raw.pop("local_disks", ()))
         volumes = tuple(machine.DiskSpec(**v) for v in raw.pop("volumes", ()))
         nics = tuple(machine.NicSpec(**n) for n in raw.pop("nics", ()))
-        return machine.MachineSpec(volumes=volumes, nics=nics, **raw)
+        return machine.MachineSpec(
+            local_disks=local_disks, volumes=volumes, nics=nics, **raw
+        )
 
     @staticmethod
     def _write_spec(spec):
@@ -176,7 +179,7 @@ class DirectMachine(machine.Machine):
 
     def _build_argv(self, spec):
         """Render a MachineSpec as a bhyve(8) command line."""
-        # order is cdrom, then root disk, then volumes (similar to libvirt)
+        # order is cdrom, root disk, ephemeral and swap, volumes (like libvirt)
         # disks should be in the order you want the guest to find them
         argv = [
             "/usr/sbin/bhyve",
@@ -205,8 +208,8 @@ class DirectMachine(machine.Machine):
             slot += 1
         argv += ["-s", "%d:0,virtio-blk,%s" % (slot, spec.root_dev)]
         slot += 1
-        for volume in spec.volumes:
-            argv += ["-s", "%d:0,virtio-blk,%s" % (slot, volume.device_path)]
+        for disk in (*spec.local_disks, *spec.volumes):
+            argv += ["-s", "%d:0,virtio-blk,%s" % (slot, disk.device_path)]
             slot += 1
 
         for nic in spec.nics:
