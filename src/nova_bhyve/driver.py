@@ -4,7 +4,6 @@ import functools
 import os
 import platform
 import tempfile
-import time
 import typing
 
 import nova.conf
@@ -39,10 +38,6 @@ MAX_CONSOLE_BYTES = 100 * units.Ki
 # matches cinder-zfs-driver LOCAL_VOLUME_TYPE for when zvol device node can be
 # used directly
 LOCAL_VOLUME_TYPE = "zfs_local"
-
-# retry for instance destroy (zvol release is async)
-BUSY_ATTEMPTS = 10
-BUSY_BACKOFF = 1.0
 
 SNAPSHOT_PREFIX = "nova-snapshot-"
 RESIZE_SNAPSHOT = "nova-resize"
@@ -207,35 +202,6 @@ def wanted_local_disks(instance, block_device_info):
         for name, size, target in disks
         if size
     ]
-
-
-def retry_while_busy(what, step):
-    """Run a zfs operation, retrying if busy."""
-    for attempt in range(1, BUSY_ATTEMPTS + 1):
-        try:
-            step()
-            return
-        except exception.BhyveDriverError as err:
-            if "busy" not in str(err) or attempt == BUSY_ATTEMPTS:
-                raise
-            LOG.info(
-                "%(what)s failed because the dataset is "
-                "busy, retrying (%(n)d/%(total)d)",
-                {"what": what, "n": attempt, "total": BUSY_ATTEMPTS},
-            )
-            time.sleep(BUSY_BACKOFF)
-
-
-def destroy_zvol(dataset):
-    """Destroy a zvol along with its snapshots and their clones."""
-    for snapshot_name in zfs.snapshots_of(dataset):
-        for clone in zfs.clones_of(snapshot_name):
-            LOG.info("destroying leftover snapshot clone %s", clone)
-            zfs.destroy_volume(clone)
-        zfs.destroy_deferred(snapshot_name)
-    retry_while_busy(
-        "destroying %s" % dataset, functools.partial(zfs.destroy_volume, dataset)
-    )
 
 
 class BhyveDriver(driver.ComputeDriver):
@@ -505,7 +471,7 @@ class BhyveDriver(driver.ComputeDriver):
             current = zfs.volsize_bytes(dataset)
             # swap holds nothing worth keeping so a new size means a new zvol
             if size is None or (name == SWAP_DISK and current != size):
-                destroy_zvol(dataset)
+                zfs.destroy_volume_and_snapshots(dataset)
             elif current < size:
                 zfs.set_volsize(dataset, size)
         for name, size in wanted.items():
@@ -572,7 +538,7 @@ class BhyveDriver(driver.ComputeDriver):
         if destroy_disks:
             for dataset in instance_zvols(uuid):
                 try:
-                    destroy_zvol(dataset)
+                    zfs.destroy_volume_and_snapshots(dataset)
                 except exception.BhyveDriverError as err:
                     LOG.warning(
                         "destroying %(dataset)s of %(uuid)s failed: %(err)s",
@@ -928,7 +894,7 @@ class BhyveDriver(driver.ComputeDriver):
             if not zfs.exists(snapshot_name):
                 LOG.info("%s has no revert snapshot", zvol)
                 continue
-            retry_while_busy(
+            zfs.retry_while_busy(
                 "rolling %s back" % zvol,
                 functools.partial(zfs.rollback, zvol, RESIZE_SNAPSHOT),
             )

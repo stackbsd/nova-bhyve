@@ -1,6 +1,8 @@
 """ZFS zvol backend for bhyve compute driver."""
 
+import functools
 import os
+import time
 
 from oslo_concurrency import processutils
 from oslo_log import log as logging
@@ -16,6 +18,10 @@ ZVOL_DEV_DIR = "/dev/zvol"
 # zfs create -V needs a multiple of dataset volblocksize
 VOLSIZE_ALIGNMENT = 1024 * 1024
 
+# retry for instance destroy (zvol release is async)
+BUSY_ATTEMPTS = 10
+BUSY_BACKOFF = 1.0
+
 
 def run(*args, dataset=None):
     """Run a zfs command, or raise."""
@@ -28,6 +34,23 @@ def run(*args, dataset=None):
             reason=(err.stderr or str(err)).strip(),
         ) from err
     return out
+
+
+def retry_while_busy(what, step):
+    """Run a zfs operation, retrying if busy."""
+    for attempt in range(1, BUSY_ATTEMPTS + 1):
+        try:
+            step()
+            return
+        except exception.BhyveDriverError as err:
+            if "busy" not in str(err) or attempt == BUSY_ATTEMPTS:
+                raise
+            LOG.info(
+                "%(what)s failed because the dataset is "
+                "busy, retrying (%(n)d/%(total)d)",
+                {"what": what, "n": attempt, "total": BUSY_ATTEMPTS},
+            )
+            time.sleep(BUSY_BACKOFF)
 
 
 def root():
@@ -202,6 +225,18 @@ def destroy_volume(dataset):
         return
     LOG.info("destroying volume %s", dataset)
     run("destroy", dataset, dataset=dataset)
+
+
+def destroy_volume_and_snapshots(dataset):
+    """Destroy a zvol along with its snapshots and their clones."""
+    for snapshot_name in snapshots_of(dataset):
+        for clone in clones_of(snapshot_name):
+            LOG.info("destroying leftover snapshot clone %s", clone)
+            destroy_volume(clone)
+        destroy_deferred(snapshot_name)
+    retry_while_busy(
+        "destroying %s" % dataset, functools.partial(destroy_volume, dataset)
+    )
 
 
 def snapshots_of(dataset):
