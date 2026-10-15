@@ -21,7 +21,7 @@ from oslo_utils import fileutils, timeutils, units
 from nova import exception as nova_exception
 from nova.virt import configdrive, driver, hardware
 from nova_bhyve import conf as bhyve_conf
-from nova_bhyve import exception, imagecache, images
+from nova_bhyve import exception, imagecache, images, lifecycle
 from nova_bhyve import machine as machine_pkg
 from nova_bhyve.storage import zfs
 
@@ -250,6 +250,7 @@ class BhyveDriver(driver.ComputeDriver):
         super().__init__(virtapi)
         self._machine = machine_pkg.get_machine()
         self._image_cache_manager = imagecache.ImageCacheManager()
+        self._lifecycle = lifecycle.LifecycleWatcher(self._machine, self.emit_event)
         self._nodename = CONF.host
 
     @log_call
@@ -270,12 +271,14 @@ class BhyveDriver(driver.ComputeDriver):
             "children are present",
             dataset,
         )
+        self._lifecycle.start()
         LOG.info("init_host complete on node %s", self._nodename)
 
 
     @log_call
     def cleanup_host(self, host):
-        """Release the hypervisor connection."""
+        """Stop the lifecycle watcher and release the hypervisor connection."""
+        self._lifecycle.stop()
         self._machine.close()
 
     def _host_resources(self):
