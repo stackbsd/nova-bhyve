@@ -12,7 +12,7 @@ An OpenStack Nova compute driver that runs instances as [bhyve](https://bhyve.or
 - Supports booting from qcow2 and raw Glance images
 - Glance images cached as zvols with zero copy root disk cloning
 - VNC console integration through `nova-novncproxy`
-- Cold attach of cinder volumes
+- Cold attach of cinder volumes, as local zvols or over remote over iSCSI (using [os-brick-freebsd](https://github.com/stackbsd/os-brick-freebsd))
 - Cold attach of network interfaces
 - Instance snapshot and upload to Glance
 - Nova image cache manager support to prune cache when no longer needed
@@ -25,6 +25,7 @@ An OpenStack Nova compute driver that runs instances as [bhyve](https://bhyve.or
 
 - Live migration is not supported yet by bhyve, so is not implemented in this driver
 - Ephemeral and swap disks are attached unformatted, the guest has to create the filesystem or swap area
+- A volume extended while attached shows its new size to the guest after the next start
 
 ## Host requirements
 
@@ -33,6 +34,8 @@ An OpenStack Nova compute driver that runs instances as [bhyve](https://bhyve.or
 A `devfs.rules` entry is needed to grant the group running Nova read/write access to the zvol device nodes.
 
 You must configure `volmode=dev` on the dataset so that the host does not publish guest partition tables into its own `/dev`.
+
+To remote attach cinder volumes, the nova host needs `iscsid` running and the os-brick-freebsd package installed.
 
 ## Configuration
 
