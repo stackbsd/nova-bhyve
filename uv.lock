@@ -1,0 +1,23 @@
+version = 1
+revision = 3
+requires-python = ">=3.12"
+
+[[package]]
+name = "nova-bhyve"
+version = "0.0.0"
+source = { editable = "." }
+dependencies = [
+    { name = "os-brick-freebsd" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "os-brick-freebsd", specifier = ">=0.9.0" }]
+
+[[package]]
+name = "os-brick-freebsd"
+version = "0.9.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/59/de/0e9fb0d0b393dfc83fdffed87ca6e72dd2277e35d87cd4b9d6dd8aa26082/os_brick_freebsd-0.9.0.tar.gz", hash = "sha256:9b52396f5782a70cdc74e98cce5df14853a37a1a3fc07f298bb50757bf4d1f7c", size = 4184, upload-time = "2026-10-17T20:37:22.857Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c9/75/c16d5e494c483e15947cabacfbc7d171b48837bd6287cbb0aa02df926820/os_brick_freebsd-0.9.0-py3-none-any.whl", hash = "sha256:1489feb3e5bd0beceb204fdd4c17672f28faea13e44a529e069de1fc877145cc", size = 4747, upload-time = "2026-10-17T20:37:21.406Z" },
+]

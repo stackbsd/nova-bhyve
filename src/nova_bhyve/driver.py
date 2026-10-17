@@ -13,12 +13,14 @@ from nova.compute import power_state, task_states
 from nova.console import type as console_type
 from nova.objects import diagnostics as diagnostics_obj
 from nova.objects import fields as obj_fields
+from os_brick_freebsd import iscsi as brick_iscsi
 from oslo_concurrency import processutils
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import fileutils, timeutils, units
 
 from nova import exception as nova_exception
+from nova import utils as nova_utils
 from nova.virt import configdrive, driver, hardware
 from nova_bhyve import conf as bhyve_conf
 from nova_bhyve import exception, imagecache, images, lifecycle
@@ -38,6 +40,7 @@ MAX_CONSOLE_BYTES = 100 * units.Ki
 # matches cinder-zfs-driver LOCAL_VOLUME_TYPE for when zvol device node can be
 # used directly
 LOCAL_VOLUME_TYPE = "zfs_local"
+ISCSI_VOLUME_TYPE = "iscsi"
 
 SNAPSHOT_PREFIX = "nova-snapshot-"
 RESIZE_SNAPSHOT = "nova-resize"
@@ -63,6 +66,7 @@ def describe(value):
 
 def log_call(method):
     """Wrap a driver method so each call is logged before the body runs."""
+
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
         """Log the call, then run the wrapped method."""
@@ -76,6 +80,7 @@ def log_call(method):
 
 def unsupported(method):
     """Wrap a method this driver does not implement, logs then raises."""
+
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
         """Log the call, then raise NotImplementedError."""
@@ -112,13 +117,16 @@ def target_dev(mountpoint, connection_info):
 
 def disk_spec(connection_info, mountpoint):
     """Turn connection_info into DiskSpec."""
-    # only the local zvol type is implemented currently
     volume_type = (connection_info or {}).get("driver_volume_type")
-    if volume_type != LOCAL_VOLUME_TYPE:
+    if volume_type not in (LOCAL_VOLUME_TYPE, ISCSI_VOLUME_TYPE):
         raise exception.BhyveDriverError(
-            reason="volume type %(actual)s is not supported; this driver only "
-            "attaches %(supported)s volumes, whose storage is on this "
-            "same host" % {"actual": volume_type, "supported": LOCAL_VOLUME_TYPE}
+            reason="volume type %(actual)s is not supported; this driver "
+            "attaches %(local)s and %(iscsi)s volumes"
+            % {
+                "actual": volume_type,
+                "local": LOCAL_VOLUME_TYPE,
+                "iscsi": ISCSI_VOLUME_TYPE,
+            }
         )
     device_path = (connection_info.get("data") or {}).get("device_path")
     if not device_path:
@@ -215,7 +223,7 @@ class BhyveDriver(driver.ComputeDriver):
         "supports_device_tagging": False,
         "supports_tagged_attach_interface": False,
         "supports_tagged_attach_volume": False,
-        "supports_extend_volume": False,
+        "supports_extend_volume": True,
         "supports_multiattach": False,
         "supports_trusted_certs": False,
         "supports_pcpus": False,
@@ -249,6 +257,7 @@ class BhyveDriver(driver.ComputeDriver):
         """Select the configured mechanism and record the node name."""
         super().__init__(virtapi)
         self._machine = machine_pkg.get_machine()
+        self._iscsi = brick_iscsi.FreeBSDISCSIConnector(nova_utils.get_root_helper())
         self._image_cache_manager = imagecache.ImageCacheManager()
         self._lifecycle = lifecycle.LifecycleWatcher(self._machine, self.emit_event)
         self._nodename = CONF.host
@@ -267,13 +276,11 @@ class BhyveDriver(driver.ComputeDriver):
         for required in (dataset, zfs.images_dataset(), zfs.instances_dataset()):
             zfs.assert_dataset(required)
         LOG.info(
-            "dataset %s and its images/ and instances/ "
-            "children are present",
+            "dataset %s and its images/ and instances/ children are present",
             dataset,
         )
         self._lifecycle.start()
         LOG.info("init_host complete on node %s", self._nodename)
-
 
     @log_call
     def cleanup_host(self, host):
@@ -352,8 +359,7 @@ class BhyveDriver(driver.ComputeDriver):
             },
         }
         LOG.info(
-            "inventory for %(node)s: %(vcpu)s VCPU, "
-            "%(mem)s MB, %(disk)s GB",
+            "inventory for %(node)s: %(vcpu)s VCPU, %(mem)s MB, %(disk)s GB",
             {
                 "node": nodename,
                 "vcpu": resources["vcpus"],
@@ -411,20 +417,18 @@ class BhyveDriver(driver.ComputeDriver):
                 self._machine.start(instance.uuid)
 
         except Exception:
-            LOG.exception(
-                "spawn of %s failed, rolling back", instance.uuid
-            )
+            LOG.exception("spawn of %s failed, rolling back", instance.uuid)
             self._teardown(instance.uuid)
+            self._disconnect_volumes(block_device_info)
             raise
 
-    @staticmethod
-    def _boot_volumes(block_device_info):
-        """Get the volumes to define alongside the root disk at boot."""
+    def _boot_volumes(self, block_device_info):
+        """Connect the volumes to define alongside the root disk at boot."""
         volumes = []
         for bdm in driver.block_device_info_get_mapping(block_device_info):
             connection_info = bdm.get("connection_info") or {}
-            mountpoint = bdm.get("mount_device")
-            volumes.append(disk_spec(connection_info, mountpoint))
+            self._connect_volume(connection_info)
+            volumes.append(disk_spec(connection_info, bdm.get("mount_device")))
         if volumes:
             LOG.info(
                 "%d volume(s) present at boot: %s",
@@ -520,6 +524,7 @@ class BhyveDriver(driver.ComputeDriver):
     ):
         """Stop and delete an instance."""
         self._teardown(instance.uuid, destroy_disks=destroy_disks)
+        self._disconnect_volumes(block_device_info)
 
     def _teardown(self, uuid, destroy_disks=True):
         """Remove every trace of an instance, skipping missing pieces."""
@@ -533,8 +538,7 @@ class BhyveDriver(driver.ComputeDriver):
                 step()
             except exception.BhyveDriverError as err:
                 LOG.warning(
-                    "%(what)s of %(uuid)s failed, "
-                    "continuing teardown: %(err)s",
+                    "%(what)s of %(uuid)s failed, continuing teardown: %(err)s",
                     {"what": description, "uuid": uuid, "err": err},
                 )
 
@@ -556,7 +560,6 @@ class BhyveDriver(driver.ComputeDriver):
                     if entry.is_file() or entry.is_symlink():
                         os.unlink(entry.path)
                 os.rmdir(directory)
-
 
     @log_call
     def cleanup(
@@ -590,6 +593,13 @@ class BhyveDriver(driver.ComputeDriver):
         share_info=None,
     ):
         """Start a stopped instance."""
+        for bdm in driver.block_device_info_get_mapping(block_device_info):
+            connection_info = bdm.get("connection_info") or {}
+            # sessions do not survive a host reboot and da numbering can change
+            if self._connect_volume(connection_info):
+                spec = disk_spec(connection_info, bdm.get("mount_device"))
+                self._machine.detach_disk(instance.uuid, spec.target_dev)
+                self._machine.attach_disk(instance.uuid, spec)
         self._machine.start(instance.uuid)
 
     @log_call
@@ -634,12 +644,45 @@ class BhyveDriver(driver.ComputeDriver):
     @log_call
     def get_volume_connector(self, instance):
         """Get node volume connector info for cinder."""
+        props = brick_iscsi.FreeBSDISCSIConnector.get_connector_properties(
+            nova_utils.get_root_helper()
+        )
         # host is compared by zfs driver to see if we can attach local
-        return {
-            "host": CONF.host,
-            "platform": platform.machine(),
-            "os_type": "freebsd",
-        }
+        props.update(
+            {
+                "host": CONF.host,
+                "ip": CONF.my_block_storage_ip,
+                "platform": platform.machine(),
+                "os_type": "freebsd",
+                "multipath": False,
+            }
+        )
+        return props
+
+    def _connect_volume(self, connection_info):
+        """Log in to a remote volume and record its host device path."""
+        if (connection_info or {}).get("driver_volume_type") != ISCSI_VOLUME_TYPE:
+            return False
+        data = connection_info["data"]
+        data["device_path"] = self._iscsi.connect_volume(data)["path"]
+        return True
+
+    def _disconnect_volume(self, connection_info):
+        """Log out of a remote volume."""
+        if (connection_info or {}).get("driver_volume_type") != ISCSI_VOLUME_TYPE:
+            return
+        self._iscsi.disconnect_volume(connection_info["data"], None)
+
+    def _disconnect_volumes(self, block_device_info):
+        """Log out of every remote volume in a mapping, logging failures."""
+        for bdm in driver.block_device_info_get_mapping(block_device_info):
+            try:
+                self._disconnect_volume(bdm.get("connection_info"))
+            except Exception as err:
+                LOG.warning(
+                    "disconnecting %(target)s failed: %(err)s",
+                    {"target": bdm.get("mount_device"), "err": err},
+                )
 
     def _refuse_if_running(self, instance, verb, device):
         """Refuse a device operation against a running instance."""
@@ -671,7 +714,15 @@ class BhyveDriver(driver.ComputeDriver):
                 reason="encrypted volumes are not supported"
             )
         self._refuse_if_running(instance, "attach", "volume")
-        self._machine.attach_disk(instance.uuid, disk_spec(connection_info, mountpoint))
+        self._connect_volume(connection_info)
+        try:
+            self._machine.attach_disk(
+                instance.uuid, disk_spec(connection_info, mountpoint)
+            )
+        except Exception:
+            # leave no session behind for a disk nova will not know about
+            self._disconnect_volume(connection_info)
+            raise
 
     @log_call
     def detach_volume(
@@ -683,6 +734,15 @@ class BhyveDriver(driver.ComputeDriver):
         self._machine.detach_disk(
             instance.uuid, target_dev(mountpoint, connection_info)
         )
+        self._disconnect_volume(connection_info)
+
+    @log_call
+    def extend_volume(self, context, connection_info, instance, requested_size):
+        """Refresh the host's view of a grown remote volume."""
+        # a zvol attached directly already shows its new size and bhyve
+        # reads disk sizes at start
+        if (connection_info or {}).get("driver_volume_type") == ISCSI_VOLUME_TYPE:
+            self._iscsi.extend_volume(connection_info["data"])
 
     @log_call
     def attach_interface(self, context, instance, image_meta, vif):
@@ -715,8 +775,7 @@ class BhyveDriver(driver.ComputeDriver):
         try:
             zfs.clone(snapshot_name, clone)
             LOG.info(
-                "snapshotting %(uuid)s as image %(image)s "
-                "(%(fmt)s), reading %(clone)s",
+                "snapshotting %(uuid)s as image %(image)s (%(fmt)s), reading %(clone)s",
                 {"uuid": uuid, "image": image_id, "fmt": image_format, "clone": clone},
             )
             update_task_state(
@@ -965,10 +1024,6 @@ class BhyveDriver(driver.ComputeDriver):
     @unsupported
     def swap_volume(self, *args, **kwargs):
         """Volume swap is unsupported."""
-
-    @unsupported
-    def extend_volume(self, *args, **kwargs):
-        """Volume extend is unsupported."""
 
     @unsupported
     def volume_snapshot_create(self, *args, **kwargs):
