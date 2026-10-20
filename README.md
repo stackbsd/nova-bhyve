@@ -12,7 +12,8 @@ An OpenStack Nova compute driver that runs instances as [bhyve](https://bhyve.or
 - Supports booting from qcow2 and raw Glance images
 - Glance images cached as zvols with zero copy root disk cloning
 - VNC console integration through `nova-novncproxy`
-- Cold attach of cinder volumes, as local zvols or over remote over iSCSI (using [os-brick-freebsd](https://github.com/stackbsd/os-brick-freebsd))
+- Config drive for instance metadata and user data
+- Cold attach of cinder volumes, as local zvols or remote over iSCSI (using [os-brick-freebsd](https://github.com/stackbsd/os-brick-freebsd))
 - Cold attach of network interfaces
 - Instance snapshot and upload to Glance
 - Nova image cache manager support to prune cache when no longer needed
