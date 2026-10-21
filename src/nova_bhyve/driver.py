@@ -23,7 +23,7 @@ from nova import exception as nova_exception
 from nova import utils as nova_utils
 from nova.virt import configdrive, driver, hardware
 from nova_bhyve import conf as bhyve_conf
-from nova_bhyve import exception, imagecache, images, lifecycle
+from nova_bhyve import exception, imagecache, images, lifecycle, migration
 from nova_bhyve import machine as machine_pkg
 from nova_bhyve.storage import zfs
 
@@ -31,8 +31,6 @@ LOG = logging.getLogger(__name__)
 
 CONF = nova.conf.CONF
 _ = bhyve_conf
-
-CONFIG_DRIVE_NAME = "config.iso"
 
 # same cap nova libvirt driver applies
 MAX_CONSOLE_BYTES = 100 * units.Ki
@@ -439,7 +437,9 @@ class BhyveDriver(driver.ComputeDriver):
 
     def _define_domain(self, instance, block_device_info=None, network_info=None):
         """Define the domain for an instance from its current flavor."""
-        iso_path = os.path.join(CONF.instances_path, instance.uuid, CONFIG_DRIVE_NAME)
+        iso_path = os.path.join(
+            CONF.instances_path, instance.uuid, machine_pkg.CONFIG_DRIVE_NAME
+        )
         spec = machine_pkg.MachineSpec(
             uuid=instance.uuid,
             title=instance.display_name or instance.uuid,
@@ -492,7 +492,7 @@ class BhyveDriver(driver.ComputeDriver):
         """Build the instance's config drive ISO and return its path."""
         directory = os.path.join(CONF.instances_path, instance.uuid)
         os.makedirs(directory, exist_ok=True)
-        path = os.path.join(directory, CONFIG_DRIVE_NAME)
+        path = os.path.join(directory, machine_pkg.CONFIG_DRIVE_NAME)
 
         extra_md = {}
         if admin_password:
@@ -846,18 +846,8 @@ class BhyveDriver(driver.ComputeDriver):
         timeout=0,
         retry_interval=0,
     ):
-        """Stop the instance and take snapshot for same-host resize only."""
+        """Stop the instance, snapshot its disks and send them to dest."""
         uuid = instance.uuid
-        if dest != self.get_host_ip_addr():
-            raise nova_exception.InstanceFaultRollback(
-                inner_exception=exception.BhyveDriverError(
-                    reason="cannot move %(uuid)s to %(dest)s: this driver "
-                    "does not currently support migrate of local zvols "
-                    "to another host, only a same-host resize is possible"
-                    % {"uuid": uuid, "dest": dest}
-                )
-            )
-
         dataset = zfs.instance_dataset(uuid)
         current = zfs.volsize_bytes(dataset)
         target = flavor.root_gb * units.Gi
@@ -884,6 +874,7 @@ class BhyveDriver(driver.ComputeDriver):
                 )
             )
 
+        running = self._machine.state(uuid)[0] == power_state.RUNNING
         self._machine.shutdown(uuid, timeout or CONF.bhyve.shutdown_timeout_graceful)
 
         for zvol in instance_zvols(uuid):
@@ -896,9 +887,45 @@ class BhyveDriver(driver.ComputeDriver):
                 zfs.destroy_deferred(snapshot_name)
             zfs.snapshot(zvol, RESIZE_SNAPSHOT)
 
+        if dest != self.get_host_ip_addr():
+            self._send_instance(uuid, dest, running)
+            self._disconnect_volumes(block_device_info)
+
         return jsonutils.dumps(
             {"root_volsize_bytes": current, "revert_snapshot": resize_snapshot(dataset)}
         )
+
+    def _send_instance(self, uuid, dest, restart):
+        """Copy an instance's disks and files to another host."""
+        LOG.info("sending %(uuid)s to %(dest)s", {"uuid": uuid, "dest": dest})
+        try:
+            for zvol in instance_zvols(uuid):
+                if zvol == zfs.instance_dataset(uuid):
+                    name = migration.ROOT_DISK
+                else:
+                    name = zvol.rsplit(".", 1)[1]
+                # swap holds nothing worth keeping and finish_migration remakes it
+                if name == SWAP_DISK:
+                    continue
+                migration.send_volume(dest, uuid, name, resize_snapshot(zvol))
+            for name in migration.INSTANCE_FILES:
+                path = os.path.join(CONF.instances_path, uuid, name)
+                if os.path.exists(path):
+                    migration.send_file(dest, uuid, path)
+        except Exception as err:
+            LOG.exception("sending %s failed, keeping it here", uuid)
+            try:
+                migration.discard(dest, uuid)
+            except Exception as cleanup_err:
+                LOG.warning(
+                    "could not discard %(uuid)s on %(dest)s: %(err)s",
+                    {"uuid": uuid, "dest": dest, "err": cleanup_err},
+                )
+            for zvol in instance_zvols(uuid):
+                zfs.destroy_deferred(resize_snapshot(zvol))
+            if restart:
+                self._machine.start(uuid)
+            raise nova_exception.InstanceFaultRollback(inner_exception=err) from err
 
     @log_call
     def finish_migration(
@@ -914,7 +941,7 @@ class BhyveDriver(driver.ComputeDriver):
         block_device_info=None,
         power_on=True,
     ):
-        """Finish the same-host resize and start the instance again."""
+        """Finish the resize or migration and start the instance again."""
         # instance.flavor is already the new flavor, grow the disk
         uuid = instance.uuid
         if resize_instance:
@@ -930,7 +957,10 @@ class BhyveDriver(driver.ComputeDriver):
 
     @log_call
     def confirm_migration(self, context, migration, instance, network_info):
-        """Drop the revert point snapshots for same-host resize."""
+        """Drop the revert points, or the whole source copy after a move."""
+        if instance.host != CONF.host:
+            self._teardown(instance.uuid)
+            return
         for zvol in instance_zvols(instance.uuid):
             zfs.destroy_deferred(resize_snapshot(zvol))
 

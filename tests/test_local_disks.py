@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 import nova.conf
+from nova.compute import power_state
 from oslo_utils import units
 
 from nova import exception as nova_exception
@@ -40,7 +41,7 @@ def make_instance(root_gb=10, ephemeral_gb=0, swap=0):
     flavor = mock.Mock(
         root_gb=root_gb, ephemeral_gb=ephemeral_gb, swap=swap, vcpus=1, memory_mb=512
     )
-    return mock.Mock(uuid=UUID, display_name="test", flavor=flavor)
+    return mock.Mock(uuid=UUID, display_name="test", flavor=flavor, host=CONF.host)
 
 
 class FakeZFS:
@@ -134,6 +135,7 @@ class LocalDiskTestCase(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
         self.driver = driver_mod.BhyveDriver(mock.Mock())
         self.driver._machine = mock.Mock()
+        self.driver._machine.state.return_value = (power_state.RUNNING, "")
 
 
 class DatasetNamingTestCase(LocalDiskTestCase):

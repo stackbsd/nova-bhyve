@@ -12,6 +12,9 @@ dependencies = [
     "os-brick-freebsd>=0.9.0",
 ]
 
+[project.scripts]
+nova-bhyve-receive = "nova_bhyve.migration:main"
+
 [build-system]
 requires = ["uv_build>=0.11.28"]
 build-backend = "uv_build"

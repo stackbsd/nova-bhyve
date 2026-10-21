@@ -9,6 +9,8 @@ ROOT_TARGET_DEV = "vda"
 # allocate a free vnc port automatically
 VNC_PORT_AUTO = 0
 
+CONFIG_DRIVE_NAME = "config.iso"
+
 
 @dataclasses.dataclass(frozen=True)
 class DiskSpec:

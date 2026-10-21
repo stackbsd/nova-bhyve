@@ -17,10 +17,7 @@ An OpenStack Nova compute driver that runs instances as [bhyve](https://bhyve.or
 - Cold attach of network interfaces
 - Instance snapshot and upload to Glance
 - Nova image cache manager support to prune cache when no longer needed
-
-### Roadmap
-
-- Cold migration between hosts (currently only supports same-host migration i.e. instance resize)
+- Resize on the same host, and cold migration between hosts using `zfs send` over ssh
 
 ### Limitations
 
@@ -37,6 +34,12 @@ A `devfs.rules` entry is needed to grant the group running Nova read/write acces
 You must configure `volmode=dev` on the dataset so that the host does not publish guest partition tables into its own `/dev`.
 
 To remote attach cinder volumes, the nova host needs `iscsid` running and the os-brick-freebsd package installed.
+
+To cold migrate between hosts, the nova user needs `send` and `receive` added to its `zfs allow` delegation. Each compute host's nova user needs an ssh key that every other compute host trusts. On the receiving side, restrict that key to the receive helper:
+
+```
+command="nova-bhyve-receive --config-file /usr/local/etc/nova/nova.conf",restrict ssh-ed25519 AAAA... nova@compute1
+```
 
 ## Configuration
 
