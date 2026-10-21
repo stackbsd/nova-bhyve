@@ -23,8 +23,9 @@ from nova import exception as nova_exception
 from nova import utils as nova_utils
 from nova.virt import configdrive, driver, hardware
 from nova_bhyve import conf as bhyve_conf
-from nova_bhyve import exception, imagecache, images, lifecycle, migration
+from nova_bhyve import exception, imagecache, images, lifecycle
 from nova_bhyve import machine as machine_pkg
+from nova_bhyve import migration as transport
 from nova_bhyve.storage import zfs
 
 LOG = logging.getLogger(__name__)
@@ -901,21 +902,21 @@ class BhyveDriver(driver.ComputeDriver):
         try:
             for zvol in instance_zvols(uuid):
                 if zvol == zfs.instance_dataset(uuid):
-                    name = migration.ROOT_DISK
+                    name = transport.ROOT_DISK
                 else:
                     name = zvol.rsplit(".", 1)[1]
                 # swap holds nothing worth keeping and finish_migration remakes it
                 if name == SWAP_DISK:
                     continue
-                migration.send_volume(dest, uuid, name, resize_snapshot(zvol))
-            for name in migration.INSTANCE_FILES:
+                transport.send_volume(dest, uuid, name, resize_snapshot(zvol))
+            for name in transport.INSTANCE_FILES:
                 path = os.path.join(CONF.instances_path, uuid, name)
                 if os.path.exists(path):
-                    migration.send_file(dest, uuid, path)
+                    transport.send_file(dest, uuid, path)
         except Exception as err:
             LOG.exception("sending %s failed, keeping it here", uuid)
             try:
-                migration.discard(dest, uuid)
+                transport.discard(dest, uuid)
             except Exception as cleanup_err:
                 LOG.warning(
                     "could not discard %(uuid)s on %(dest)s: %(err)s",
@@ -949,6 +950,7 @@ class BhyveDriver(driver.ComputeDriver):
             if target:
                 zfs.set_volsize(zfs.instance_dataset(uuid), target)
         self._sync_local_disks(instance, block_device_info)
+        transport.claim_files(uuid)
 
         # update definition on disk and power on
         self._define_domain(instance, block_device_info, network_info)

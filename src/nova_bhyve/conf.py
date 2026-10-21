@@ -31,14 +31,14 @@ bhyve_opts = [
     cfg.StrOpt(
         "nvram_template",
         default="/usr/local/share/edk2-bhyve/BHYVE_UEFI_VARS.fd",
-        help="Template for instance UEFI variables."
+        help="Template for instance UEFI variables.",
     ),
     cfg.IntOpt(
         "destroy_timeout",
         default=10,
         min=1,
         help="Seconds to wait for a guest to disappear after a hard stop "
-        "before giving up and reclaiming its resources anyway."
+        "before giving up and reclaiming its resources anyway.",
     ),
     cfg.StrOpt(
         "image_scratch_dir",
@@ -57,6 +57,17 @@ bhyve_opts = [
         "ignore_unimplemented_msr",
         default=False,
         help="Might help with running bhyve nested in a KVM guest.",
+    ),
+    cfg.StrOpt(
+        "migration_ssh_config",
+        help="ssh configuration file used to reach other compute hosts "
+        "for cold migration.",
+    ),
+    cfg.StrOpt(
+        "migration_staging_path",
+        default="/var/db/nova-migrate/instances",
+        help="Directory where the receive helper stages instance files "
+        "for cold migration.",
     ),
     cfg.IntOpt(
         "shutdown_timeout_graceful",

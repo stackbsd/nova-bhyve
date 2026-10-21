@@ -124,6 +124,10 @@ class ReceiveTestCase(LocalDiskTestCase):
         self.run = mock.patch.object(subprocess, "run").start()
         self.run.side_effect = self.fake_receive
         self.directory = os.path.join(self.tmp.name, UUID)
+        self.staging = os.path.join(self.tmp.name, "staging")
+        CONF.set_override("migration_staging_path", self.staging, group="bhyve")
+        self.addCleanup(CONF.clear_override, "migration_staging_path", group="bhyve")
+        self.staged = os.path.join(self.staging, UUID)
 
     def fake_receive(self, argv, **kwargs):
         """Create the received zvol with the sender's snapshot."""
@@ -178,12 +182,38 @@ class ReceiveTestCase(LocalDiskTestCase):
             self.assertEqual(1, migration.serve(command), command)
         self.run.assert_not_called()
 
-    def test_receives_nvram(self):
-        """An allowed instance file is written from stdin."""
+    def test_receives_nvram_into_staging(self):
+        """An allowed instance file is staged from stdin for nova's group."""
         self.stdin(b"vars")
         self.assertEqual(0, migration.serve("file %s %s" % (UUID, direct.NVRAM_FILE)))
+        path = os.path.join(self.staged, direct.NVRAM_FILE)
+        with open(path, "rb") as handle:
+            self.assertEqual(b"vars", handle.read())
+        self.assertEqual(0o770, os.stat(self.staged).st_mode & 0o777)
+        self.assertEqual(0o660, os.stat(path).st_mode & 0o777)
+        self.assertFalse(os.path.exists(self.directory))
+
+    def test_finish_migration_claims_staged_files(self):
+        """The destination moves staged files into the instance directory."""
+        self.stdin(b"vars")
+        migration.serve("file %s %s" % (UUID, direct.NVRAM_FILE))
+        self.driver._define_domain = mock.Mock()
+        self.driver._sync_local_disks = mock.Mock()
+        self.driver.finish_migration(
+            None, None, make_instance(), None, None, None, False, None
+        )
         with open(os.path.join(self.directory, direct.NVRAM_FILE), "rb") as handle:
             self.assertEqual(b"vars", handle.read())
+        self.assertFalse(os.path.exists(self.staged))
+
+    def test_finish_resize_without_staged_files(self):
+        """A same-host resize has nothing staged and claims nothing."""
+        self.driver._define_domain = mock.Mock()
+        self.driver._sync_local_disks = mock.Mock()
+        self.driver.finish_migration(
+            None, None, make_instance(), None, None, None, False, None
+        )
+        self.assertFalse(os.path.exists(self.directory))
 
     def test_discard_removes_received_copy(self):
         """Discard removes the received zvols, files and directory."""
@@ -192,7 +222,7 @@ class ReceiveTestCase(LocalDiskTestCase):
         migration.serve("file %s %s" % (UUID, direct.NVRAM_FILE))
         self.assertEqual(0, migration.serve("discard %s" % UUID))
         self.assertEqual({}, self.zfs.volumes)
-        self.assertFalse(os.path.exists(self.directory))
+        self.assertFalse(os.path.exists(self.staged))
 
     def test_discard_refuses_defined_instance(self):
         """Discard never touches an instance that runs here."""
@@ -203,7 +233,32 @@ class ReceiveTestCase(LocalDiskTestCase):
 
 
 class TransportTestCase(unittest.TestCase):
-    """The sender reports remote failures."""
+    """The sender reaches the receiver over ssh and reports failures."""
+
+    def test_remote_uses_configured_ssh_config(self):
+        """An ssh config file is passed with -F when set."""
+        CONF.set_override("migration_ssh_config", "/etc/nova/ssh_config", group="bhyve")
+        self.addCleanup(CONF.clear_override, "migration_ssh_config", group="bhyve")
+        self.assertEqual(
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-F",
+                "/etc/nova/ssh_config",
+                DEST,
+                "discard",
+                UUID,
+            ],
+            migration.remote(DEST, "discard", UUID),
+        )
+
+    def test_remote_without_ssh_config(self):
+        """Without a config file ssh runs with its own defaults."""
+        self.assertEqual(
+            ["ssh", "-o", "BatchMode=yes", DEST, "discard", UUID],
+            migration.remote(DEST, "discard", UUID),
+        )
 
     def test_send_file_reports_remote_error(self):
         """The receiver's stderr ends up in the raised error."""

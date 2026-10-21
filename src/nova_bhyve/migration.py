@@ -2,6 +2,7 @@
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -24,7 +25,10 @@ INSTANCE_FILES = (direct.NVRAM_FILE, machine.CONFIG_DRIVE_NAME)
 
 def remote(host, *words):
     """Return the ssh command line running a receiver verb on a host."""
-    return [*SSH, host, *words]
+    command = [*SSH]
+    if CONF.bhyve.migration_ssh_config:
+        command += ["-F", CONF.bhyve.migration_ssh_config]
+    return [*command, host, *words]
 
 
 def check_result(proc, err, what, host):
@@ -76,6 +80,25 @@ def discard(host, uuid):
     check_result(proc, proc.stderr, "discarding %s" % uuid, host)
 
 
+def staging_dir(uuid):
+    """Return the directory where an instance's files are staged."""
+    return os.path.join(CONF.bhyve.migration_staging_path, uuid)
+
+
+def claim_files(uuid):
+    """Move staged instance files into the instance directory."""
+    directory = staging_dir(uuid)
+    if not os.path.isdir(directory):
+        return
+    target = direct.uuid_dir(uuid)
+    os.makedirs(target, exist_ok=True)
+    for name in INSTANCE_FILES:
+        path = os.path.join(directory, name)
+        if os.path.exists(path):
+            shutil.move(path, os.path.join(target, name))
+    shutil.rmtree(directory)
+
+
 def disk_dataset(uuid, disk):
     """Return the local dataset a received disk lands in."""
     if disk == ROOT_DISK:
@@ -109,27 +132,24 @@ def receive_file(uuid, name):
     assert_not_defined(uuid)
     if name not in INSTANCE_FILES:
         raise ValueError("refusing file name %r" % name)
-    directory = direct.uuid_dir(uuid)
+    directory = staging_dir(uuid)
     os.makedirs(directory, exist_ok=True)
+    # set the modes explicitly since the umask would hide them from the nova group
+    os.chmod(directory, 0o770)
     path = os.path.join(directory, name)
     with open(path + ".tmp", "wb") as handle:
+        os.fchmod(handle.fileno(), 0o660)
         while chunk := sys.stdin.buffer.read(1024 * 1024):
             handle.write(chunk)
     os.rename(path + ".tmp", path)
 
 
 def discard_instance(uuid):
-    """Remove the received disks and files of an undefined instance."""
+    """Remove the received disks and staged files of an undefined instance."""
     assert_not_defined(uuid)
     for dataset in (zfs.instance_dataset(uuid), *zfs.local_disks(uuid)):
         zfs.destroy_volume_and_snapshots(dataset)
-    directory = direct.uuid_dir(uuid)
-    for name in INSTANCE_FILES:
-        path = os.path.join(directory, name)
-        if os.path.exists(path):
-            os.unlink(path)
-    if os.path.isdir(directory) and not os.listdir(directory):
-        os.rmdir(directory)
+    shutil.rmtree(staging_dir(uuid), ignore_errors=True)
 
 
 VERBS = {

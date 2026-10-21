@@ -35,12 +35,6 @@ You must configure `volmode=dev` on the dataset so that the host does not publis
 
 To remote attach cinder volumes, the nova host needs `iscsid` running and the os-brick-freebsd package installed.
 
-To cold migrate between hosts, the nova user needs `send` and `receive` added to its `zfs allow` delegation. Each compute host's nova user needs an ssh key that every other compute host trusts. On the receiving side, restrict that key to the receive helper:
-
-```
-command="nova-bhyve-receive --config-file /usr/local/etc/nova/nova.conf",restrict ssh-ed25519 AAAA... nova@compute1
-```
-
 ## Configuration
 
 Example configuration for Nova:
@@ -52,4 +46,19 @@ allow_resize_to_same_host = True
 
 [bhyve]
 zfs_dataset = zroot/nova
+# migration_ssh_config = /usr/local/etc/nova/ssh_config
+# migration_staging_path = /var/db/nova-migrate/instances
+```
+
+### Migration between hosts
+
+To migrate between hosts, the nova user needs `send` added to its `zfs allow` delegation and an ssh key.
+See the `migration_ssh_config` configuration opt. 
+
+The user on the receiving host needs `create,destroy,receive` delegated on the dataset and write access to `migration_staging_path`.
+
+Additionally you can lock down this user to only execute the receive command, for example (in `authorized_keys`):
+
+```
+command="nova-bhyve-receive --config-file /path/to/nova.conf",restrict ssh-ed25519 AAAA...
 ```
