@@ -20,8 +20,8 @@ bhyve_opts = [
     cfg.StrOpt(
         "mechanism",
         default="direct",
-        choices=("direct",),
-        help="Mechansim for interacting with bhyve.",
+        choices=("direct", "fake"),
+        help="Mechanism the driver uses to run guests.",
     ),
     cfg.StrOpt(
         "bootrom_path",
