@@ -622,7 +622,20 @@ class BhyveDriver(driver.ComputeDriver):
             self._machine.shutdown(uuid, CONF.bhyve.shutdown_timeout_graceful)
         else:
             self._machine.destroy(uuid)
+            # iscsi sessions and da numbering may have changed since the define
+            self._define_domain(instance, block_device_info, network_info)
         self._machine.start(uuid)
+
+    @log_call
+    def resume_state_on_host_boot(
+        self, context, instance, network_info, share_info, block_device_info=None
+    ):
+        """Start an instance that was running before the host rebooted."""
+        # an undefined domain is left alone as there is nothing to start
+        state = self._machine.state(instance.uuid)[0]
+        if state in (power_state.RUNNING, power_state.NOSTATE):
+            return
+        self.reboot(context, instance, network_info, "HARD", block_device_info)
 
     @log_call
     def plug_vifs(self, instance, network_info):
