@@ -622,6 +622,8 @@ class BhyveDriver(driver.ComputeDriver):
             self._machine.shutdown(uuid, CONF.bhyve.shutdown_timeout_graceful)
         else:
             self._machine.destroy(uuid)
+            # iscsi sessions and da numbering may have changed since the define
+            self._define_domain(instance, block_device_info, network_info)
         self._machine.start(uuid)
 
     @log_call
