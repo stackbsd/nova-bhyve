@@ -3,6 +3,8 @@
 import abc
 import dataclasses
 
+from nova_bhyve import conf
+
 # only affects name returned by the API
 ROOT_TARGET_DEV = "vda"
 
@@ -113,7 +115,9 @@ class Machine(metaclass=abc.ABCMeta):
 
 def get_machine():
     """Return the configured mechanism implementation."""
-    # currently on direct mechanism, libvirt in future
-    from nova_bhyve.machine import direct as direct_machine
+    # imported here as both mechanisms import this module
+    from nova_bhyve.machine import direct, fake
 
-    return direct_machine.DirectMachine()
+    if conf.CONF.bhyve.mechanism == "fake":
+        return fake.FakeMachine()
+    return direct.DirectMachine()
