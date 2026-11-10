@@ -19,6 +19,7 @@ from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import fileutils, timeutils, units
 
+from nova import block_device
 from nova import exception as nova_exception
 from nova import utils as nova_utils
 from nova.virt import configdrive, driver, hardware
@@ -188,7 +189,16 @@ def resize_snapshot(dataset):
 
 def instance_zvols(uuid):
     """Return the root, ephemeral and swap zvols of an instance."""
-    return [zfs.instance_dataset(uuid), *zfs.local_disks(uuid)]
+    root = zfs.instance_dataset(uuid)
+    local = zfs.local_disks(uuid)
+    return [root, *local] if zfs.exists(root) else local
+
+
+def root_volume(block_device_info):
+    """Return the volume mapping the instance boots from, or None."""
+    return block_device.get_root_bdm(
+        driver.block_device_info_get_mapping(block_device_info)
+    )
 
 
 def wanted_local_disks(instance, block_device_info):
@@ -388,18 +398,20 @@ class BhyveDriver(driver.ComputeDriver):
         accel_info=None,
     ):
         """Boot an instance."""
-        # check image is supported format
-        images.check_acceptable(image_meta)
-
-        # clone instance zvol from image snapshot, populating cache if needed
+        volume_backed = root_volume(block_device_info) is not None
         flavor_bytes = instance.flavor.root_gb * units.Gi
-        base, _virtual_size = images.ensure_cached(context, image_meta, flavor_bytes)
         target = zfs.instance_dataset(instance.uuid)
-        zfs.clone(base, target)
+        if not volume_backed:
+            # check image is supported format
+            images.check_acceptable(image_meta)
+
+            # clone instance zvol from image snapshot, populating cache if needed
+            base, _size = images.ensure_cached(context, image_meta, flavor_bytes)
+            zfs.clone(base, target)
 
         try:
             # the clone inherits image volsize, so resize it to the flavor
-            if flavor_bytes and flavor_bytes > zfs.volsize_bytes(target):
+            if not volume_backed and flavor_bytes > zfs.volsize_bytes(target):
                 zfs.set_volsize(target, flavor_bytes)
 
             self._sync_local_disks(instance, block_device_info)
@@ -424,7 +436,8 @@ class BhyveDriver(driver.ComputeDriver):
     def _boot_volumes(self, block_device_info):
         """Connect the volumes to define alongside the root disk at boot."""
         volumes = []
-        for bdm in driver.block_device_info_get_mapping(block_device_info):
+        mapping = driver.block_device_info_get_mapping(block_device_info)
+        for bdm in block_device.get_bdms_to_connect(mapping, exclude_root_mapping=True):
             connection_info = bdm.get("connection_info") or {}
             self._connect_volume(connection_info)
             volumes.append(disk_spec(connection_info, bdm.get("mount_device")))
@@ -438,15 +451,22 @@ class BhyveDriver(driver.ComputeDriver):
 
     def _define_domain(self, instance, block_device_info=None, network_info=None):
         """Define the domain for an instance from its current flavor."""
-        iso_path = os.path.join(
-            CONF.instances_path, instance.uuid, machine_pkg.CONFIG_DRIVE_NAME
-        )
+        iso_path = os.path.join(CONF.instances_path, instance.uuid, CONFIG_DRIVE_NAME)
+        boot_volume = root_volume(block_device_info)
+        if boot_volume is None:
+            root_dev = zfs.device_path(zfs.instance_dataset(instance.uuid))
+        else:
+            connection_info = boot_volume.get("connection_info") or {}
+            self._connect_volume(connection_info)
+            root_dev = disk_spec(
+                connection_info, boot_volume.get("mount_device")
+            ).device_path
         spec = machine_pkg.MachineSpec(
             uuid=instance.uuid,
             title=instance.display_name or instance.uuid,
             vcpus=instance.flavor.vcpus,
             mem_mib=instance.flavor.memory_mb,
-            root_dev=zfs.device_path(zfs.instance_dataset(instance.uuid)),
+            root_dev=root_dev,
             iso_path=iso_path if os.path.exists(iso_path) else None,
             local_disks=tuple(
                 machine_pkg.DiskSpec(
@@ -594,6 +614,11 @@ class BhyveDriver(driver.ComputeDriver):
         share_info=None,
     ):
         """Start a stopped instance."""
+        # an iscsi root can come back as another da device so redefine
+        if root_volume(block_device_info) is not None:
+            self._define_domain(instance, block_device_info, network_info)
+            self._machine.start(instance.uuid)
+            return
         for bdm in driver.block_device_info_get_mapping(block_device_info):
             connection_info = bdm.get("connection_info") or {}
             # sessions do not survive a host reboot and da numbering can change
@@ -623,7 +648,20 @@ class BhyveDriver(driver.ComputeDriver):
             self._machine.shutdown(uuid, CONF.bhyve.shutdown_timeout_graceful)
         else:
             self._machine.destroy(uuid)
+            # iscsi sessions and da numbering may have changed since the define
+            self._define_domain(instance, block_device_info, network_info)
         self._machine.start(uuid)
+
+    @log_call
+    def resume_state_on_host_boot(
+        self, context, instance, network_info, share_info, block_device_info=None
+    ):
+        """Start an instance that was running before the host rebooted."""
+        # an undefined domain is left alone as there is nothing to start
+        state = self._machine.state(instance.uuid)[0]
+        if state in (power_state.RUNNING, power_state.NOSTATE):
+            return
+        self.reboot(context, instance, network_info, "HARD", block_device_info)
 
     @log_call
     def plug_vifs(self, instance, network_info):
@@ -850,7 +888,9 @@ class BhyveDriver(driver.ComputeDriver):
         """Stop the instance, snapshot its disks and send them to dest."""
         uuid = instance.uuid
         dataset = zfs.instance_dataset(uuid)
-        current = zfs.volsize_bytes(dataset)
+        current = 0
+        if root_volume(block_device_info) is None:
+            current = zfs.volsize_bytes(dataset)
         target = flavor.root_gb * units.Gi
         if target and target < current:
             raise nova_exception.InstanceFaultRollback(
@@ -945,7 +985,7 @@ class BhyveDriver(driver.ComputeDriver):
         """Finish the resize or migration and start the instance again."""
         # instance.flavor is already the new flavor, grow the disk
         uuid = instance.uuid
-        if resize_instance:
+        if resize_instance and root_volume(block_device_info) is None:
             target = instance.flavor.root_gb * units.Gi
             if target:
                 zfs.set_volsize(zfs.instance_dataset(uuid), target)

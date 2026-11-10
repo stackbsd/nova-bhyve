@@ -26,3 +26,8 @@ class GetMachineTestCase(unittest.TestCase):
         """mechanism=direct selects DirectMachine."""
         self._override("direct")
         self.assertEqual("DirectMachine", type(machine.get_machine()).__name__)
+
+    def test_fake_is_selected_explicitly(self):
+        """mechanism=fake selects FakeMachine."""
+        self._override("fake")
+        self.assertEqual("FakeMachine", type(machine.get_machine()).__name__)

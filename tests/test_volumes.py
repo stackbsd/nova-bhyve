@@ -316,6 +316,62 @@ class LifecycleVolumesTestCase(unittest.TestCase):
             with self.assertLogs(driver_mod.LOG.logger, "WARNING"):
                 self.driver.destroy(None, self.instance, None, block_device_info=info)
 
+    def definable(self):
+        """Return an instance with a flavor and a mapping with a remote volume."""
+        CONF.set_override("zfs_dataset", "tank/nova", group="bhyve")
+        self.addCleanup(CONF.clear_override, "zfs_dataset", group="bhyve")
+        instance = mock.Mock(
+            uuid=UUID,
+            display_name="test",
+            flavor=mock.Mock(vcpus=1, memory_mb=512, ephemeral_gb=0),
+        )
+        return instance, {"block_device_mapping": [self.iscsi_bdm]}
+
+    def reboot(self, reboot_type):
+        """Reboot an instance with a flavor and a remote volume."""
+        instance, info = self.definable()
+        self.driver.reboot(None, instance, [], reboot_type, block_device_info=info)
+
+    def resume(self, state):
+        """Resume an instance found in the given power state after host boot."""
+        self.driver._machine.state.return_value = (state, "")
+        instance, info = self.definable()
+        self.driver.resume_state_on_host_boot(None, instance, [], None, info)
+
+    def test_hard_reboot_reconnects_and_redefines(self):
+        """A hard reboot logs in again and defines the current device."""
+        self.reboot("HARD")
+        self.driver._iscsi.connect_volume.assert_called_once_with(
+            self.iscsi_bdm["connection_info"]["data"]
+        )
+        spec = self.driver._machine.define.call_args.args[0]
+        self.assertEqual(
+            (machine.DiskSpec(device_path=DA_PATH, target_dev="vdc"),), spec.volumes
+        )
+        self.driver._machine.destroy.assert_called_once_with(UUID)
+        self.driver._machine.start.assert_called_once_with(UUID)
+
+    def test_soft_reboot_keeps_the_definition(self):
+        """A soft reboot restarts the domain as it is defined."""
+        self.reboot("SOFT")
+        self.driver._machine.define.assert_not_called()
+        self.driver._iscsi.connect_volume.assert_not_called()
+        self.driver._machine.start.assert_called_once_with(UUID)
+
+    def test_resume_hard_reboots_a_stopped_instance(self):
+        """A stopped instance is reconnected, redefined and started."""
+        self.resume(power_state.SHUTDOWN)
+        self.driver._iscsi.connect_volume.assert_called_once()
+        self.driver._machine.define.assert_called_once()
+        self.driver._machine.start.assert_called_once_with(UUID)
+
+    def test_resume_leaves_running_and_undefined_alone(self):
+        """A running or undefined instance is not touched."""
+        for state in (power_state.RUNNING, power_state.NOSTATE):
+            self.resume(state)
+        self.driver._machine.define.assert_not_called()
+        self.driver._machine.start.assert_not_called()
+
     def test_volume_connector_reports_the_initiator(self):
         """The connector properties carry the FreeBSD initiator name."""
         with mock.patch.object(
