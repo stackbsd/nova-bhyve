@@ -18,10 +18,7 @@ An OpenStack Nova compute driver that runs instances as [bhyve](https://bhyve.or
 - Cold attach of network interfaces
 - Instance snapshot and upload to Glance
 - Nova image cache manager support to prune cache when no longer needed
-
-### Roadmap
-
-- Cold migration between hosts (currently only supports same-host migration i.e. instance resize)
+- Resize on the same host, and cold migration between hosts using `zfs send` over ssh
 
 ### Limitations
 
@@ -50,4 +47,19 @@ allow_resize_to_same_host = True
 
 [bhyve]
 zfs_dataset = zroot/nova
+# migration_ssh_config = /usr/local/etc/nova/ssh_config
+# migration_staging_path = /var/db/nova-migrate/instances
+```
+
+### Migration between hosts
+
+To migrate between hosts, the nova user needs `send` added to its `zfs allow` delegation and an ssh key.
+See the `migration_ssh_config` configuration opt. 
+
+The user on the receiving host needs `create,destroy,mount,receive` delegated on the dataset and write access to `migration_staging_path`.
+
+Additionally you can lock down this user to only execute the receive command, for example (in `authorized_keys`):
+
+```
+command="nova-bhyve-receive --config-file /path/to/nova.conf",restrict ssh-ed25519 AAAA...
 ```
