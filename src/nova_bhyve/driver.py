@@ -451,7 +451,9 @@ class BhyveDriver(driver.ComputeDriver):
 
     def _define_domain(self, instance, block_device_info=None, network_info=None):
         """Define the domain for an instance from its current flavor."""
-        iso_path = os.path.join(CONF.instances_path, instance.uuid, CONFIG_DRIVE_NAME)
+        iso_path = os.path.join(
+            CONF.instances_path, instance.uuid, machine_pkg.CONFIG_DRIVE_NAME
+        )
         boot_volume = root_volume(block_device_info)
         if boot_volume is None:
             root_dev = zfs.device_path(zfs.instance_dataset(instance.uuid))
