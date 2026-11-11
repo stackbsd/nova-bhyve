@@ -289,6 +289,26 @@ class TransportTestCase(unittest.TestCase):
             migration.send_volume(DEST, UUID, "root", ROOT + "@nova-resize")
         self.assertIn("no such dataset", str(caught.exception))
 
+    def test_send_volume_reports_failed_receive(self):
+        """A receiver failure is reported when zfs send fails after it."""
+        popen = subprocess.Popen
+
+        def fake_popen(argv, **kwargs):
+            """Run a failing command in place of zfs send."""
+            if argv[0] == "zfs":
+                argv = ["sh", "-c", "echo signal received >&2; exit 1"]
+            return popen(argv, **kwargs)
+
+        receiver = ["sh", "-c", "echo permission denied >&2; exit 1"]
+        with (
+            mock.patch.object(migration, "remote", return_value=receiver),
+            mock.patch.object(subprocess, "Popen", fake_popen),
+            self.assertRaises(exception.BhyveDriverError) as caught,
+        ):
+            migration.send_volume(DEST, UUID, "root", ROOT + "@nova-resize")
+        self.assertIn("receiving", str(caught.exception))
+        self.assertIn("permission denied", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

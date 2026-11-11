@@ -56,8 +56,9 @@ def send_volume(host, uuid, disk, snapshot_name):
         send.stdout.close()
         _out, recv_err = recv.communicate()
         send_err = send.stderr.read()
+    # check the receiver first as its exit makes zfs send fail with EPIPE
+    check_result(recv, recv_err + send_err, "receiving %s" % snapshot_name, host)
     check_result(send, send_err, "sending %s" % snapshot_name, host)
-    check_result(recv, recv_err, "receiving %s" % snapshot_name, host)
 
 
 def send_file(host, uuid, path):
