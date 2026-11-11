@@ -56,7 +56,7 @@ zfs_dataset = zroot/nova
 To migrate between hosts, the nova user needs `send` added to its `zfs allow` delegation and an ssh key.
 See the `migration_ssh_config` configuration opt. 
 
-The user on the receiving host needs `create,destroy,receive` delegated on the dataset and write access to `migration_staging_path`.
+The user on the receiving host needs `create,destroy,mount,receive` delegated on the dataset and write access to `migration_staging_path`.
 
 Additionally you can lock down this user to only execute the receive command, for example (in `authorized_keys`):
 
