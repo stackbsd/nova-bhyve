@@ -176,10 +176,10 @@ class AwaitNicsTestCase(unittest.TestCase):
                 self.assertIn("never appeared", str(err))
                 self.assertIn("tap3fb01977-a4", str(err))
 
-    def test_the_privsep_surface_is_four_functions(self):
-        """Tap lifecycle is the networking layer's; privsep stays four entrypoints."""
+    def test_the_privsep_surface_is_five_functions(self):
+        """Tap lifecycle is the networking layer's; privsep stays five entrypoints."""
         import inspect
 
         source = inspect.getsource(privsep)
-        self.assertEqual(4, source.count("sys_admin_pctxt.entrypoint"))
+        self.assertEqual(5, source.count("sys_admin_pctxt.entrypoint"))
         self.assertNotIn("def plug_vif", source)

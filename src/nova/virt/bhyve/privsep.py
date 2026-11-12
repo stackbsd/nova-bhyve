@@ -1,5 +1,6 @@
 """Privileged operations for the bhyve driver."""
 
+import fcntl
 import os
 import re
 import signal
@@ -100,6 +101,28 @@ def stop_domain(state_dir, name, graceful=True):
     except ProcessLookupError:
         return False
     return True
+
+
+def pidfile_held(path):
+    """Report whether a running process holds the lock on a pidfile."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+    return False
+
+
+@nova.privsep.sys_admin_pctxt.entrypoint
+def supervisor_running(state_dir, name):
+    """Report whether a guest's supervisor is still running."""
+    check_state_dir(state_dir, name)
+    return pidfile_held(os.path.join(state_dir, "supervisor.pid"))
 
 
 @nova.privsep.sys_admin_pctxt.entrypoint
