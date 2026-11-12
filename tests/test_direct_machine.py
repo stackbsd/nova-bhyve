@@ -268,6 +268,9 @@ class StartTestCase(unittest.TestCase):
         with mock.patch.object(direct.shutil, "copyfile"):
             self.machine._write_spec(make_spec(uuid=self.uuid))
         self.start_domain = mock.patch.object(direct.privsep, "start_domain").start()
+        self.supervisor_running = mock.patch.object(
+            direct.privsep, "supervisor_running", return_value=False
+        ).start()
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(self.machine, "_await_nics").start()
         mock.patch.object(direct.time, "sleep").start()
@@ -303,7 +306,7 @@ class StartTestCase(unittest.TestCase):
 
     def test_start_raises_on_timeout(self):
         """No pid and no verdict before the deadline raises."""
-        clock = iter([0, 0, direct.START_WAIT_SECONDS + 1])
+        clock = iter([0, 0, 0, direct.START_WAIT_SECONDS + 1])
         with mock.patch.object(direct.time, "time", lambda: next(clock)):
             with self.assertRaises(direct.exception.MachineError) as ctx:
                 self.machine.start(self.uuid)
@@ -325,3 +328,93 @@ class StartTestCase(unittest.TestCase):
         self.start_domain.side_effect = launched
         self.machine.start(self.uuid)
         self.assertFalse(os.path.exists(os.path.join(self.dir, "exit.status")))
+
+    def test_start_waits_for_the_previous_supervisor_to_exit(self):
+        """A supervisor still exiting delays the launch until it is gone."""
+        self.supervisor_running.side_effect = [True, True, False]
+
+        def launched(*_args, **_kwargs):
+            self._write("bhyve.pid", "%d\n" % os.getpid())
+
+        self.start_domain.side_effect = launched
+        self.machine.start(self.uuid)
+        self.assertEqual(3, self.supervisor_running.call_count)
+        self.assertEqual(2, direct.time.sleep.call_count)
+        self.start_domain.assert_called_once()
+
+    def test_start_raises_when_the_previous_supervisor_never_exits(self):
+        """A supervisor that outlives the timeout fails the start."""
+        self.supervisor_running.return_value = True
+        clock = iter([0, CONF.bhyve.destroy_timeout + 1])
+        with mock.patch.object(direct.time, "time", lambda: next(clock)):
+            with self.assertRaises(direct.exception.MachineError) as ctx:
+                self.machine.start(self.uuid)
+        self.assertIn("previous supervisor", str(ctx.exception))
+        self.start_domain.assert_not_called()
+
+
+class StopTestCase(unittest.TestCase):
+    """destroy() and shutdown() return only once the supervisor is gone."""
+
+    def setUp(self):
+        """Create a running instance and stub out the privileged calls."""
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        CONF.set_override("instances_path", self.tmp.name)
+        self.addCleanup(CONF.clear_override, "instances_path")
+        self.uuid = "11111111-2222-3333-4444-555555555555"
+        self.dir = os.path.join(self.tmp.name, self.uuid)
+        os.makedirs(self.dir)
+        self.machine = direct.DirectMachine()
+        with mock.patch.object(direct.shutil, "copyfile"):
+            self.machine._write_spec(make_spec(uuid=self.uuid))
+        self.pidfile = os.path.join(self.dir, "bhyve.pid")
+        with open(self.pidfile, "w") as handle:
+            handle.write("%d\n" % os.getpid())
+        self.stop_domain = mock.patch.object(direct.privsep, "stop_domain").start()
+        self.reap_vm = mock.patch.object(direct.privsep, "reap_vm").start()
+        self.supervisor_running = mock.patch.object(
+            direct.privsep, "supervisor_running"
+        ).start()
+        self.sleep = mock.patch.object(direct.time, "sleep").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def test_destroy_waits_for_the_supervisor_after_bhyve_is_gone(self):
+        """The vmm object is reclaimed only after the supervisor exits."""
+        self.stop_domain.side_effect = lambda *a, **kw: os.unlink(self.pidfile)
+        self.supervisor_running.side_effect = [True, True, False]
+        self.reap_vm.side_effect = lambda _uuid: self.assertEqual(
+            3, self.supervisor_running.call_count
+        )
+        self.machine.destroy(self.uuid)
+        self.stop_domain.assert_called_once_with(self.dir, self.uuid, graceful=False)
+        self.assertEqual(2, self.sleep.call_count)
+        self.reap_vm.assert_called_once_with(self.uuid)
+
+    def test_destroy_gives_up_on_a_supervisor_after_the_timeout(self):
+        """A supervisor that never exits does not block the reclaim."""
+        self.stop_domain.side_effect = lambda *a, **kw: os.unlink(self.pidfile)
+        self.supervisor_running.return_value = True
+        clock = iter([0, CONF.bhyve.destroy_timeout + 1])
+        with mock.patch.object(direct.time, "time", lambda: next(clock)):
+            self.machine.destroy(self.uuid)
+        self.reap_vm.assert_called_once_with(self.uuid)
+
+    def test_destroy_of_a_stopped_instance_does_not_signal_or_sleep(self):
+        """A stopped instance with no supervisor is reclaimed at once."""
+        os.unlink(self.pidfile)
+        self.supervisor_running.return_value = False
+        self.machine.destroy(self.uuid)
+        self.stop_domain.assert_not_called()
+        self.sleep.assert_not_called()
+        self.reap_vm.assert_called_once_with(self.uuid)
+
+    def test_shutdown_waits_for_the_supervisor_after_the_guest_stops(self):
+        """A graceful stop returns only after the supervisor exits."""
+        self.stop_domain.side_effect = lambda *a, **kw: os.unlink(self.pidfile)
+        self.supervisor_running.side_effect = [True, False]
+        self.machine.shutdown(self.uuid, 30)
+        self.stop_domain.assert_called_once_with(self.dir, self.uuid, graceful=True)
+        self.assertEqual(1, self.sleep.call_count)
+        self.reap_vm.assert_not_called()

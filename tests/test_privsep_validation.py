@@ -1,5 +1,8 @@
 """Tests for the argument validation in the privileged entrypoints."""
 
+import fcntl
+import os
+import tempfile
 import unittest
 
 from nova.virt.bhyve import privsep
@@ -59,3 +62,31 @@ class StateDirValidationTestCase(unittest.TestCase):
     def test_a_bad_name_is_refused_even_with_a_matching_directory(self):
         """A malformed name fails regardless of the directory shape."""
         self.assertRaises(ValueError, privsep.check_state_dir, "/tmp/../etc", "../etc")
+
+
+class PidfileHeldTestCase(unittest.TestCase):
+    """pidfile_held() follows the lock daemon(8) keeps, not the pid inside."""
+
+    def setUp(self):
+        """Create a pidfile naming a live process."""
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, "supervisor.pid")
+        with open(self.path, "w") as handle:
+            handle.write("%d\n" % os.getpid())
+
+    def test_a_locked_pidfile_is_held(self):
+        """An exclusive lock on the file reads as a running process."""
+        fd = os.open(self.path, os.O_RDONLY)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        self.assertTrue(privsep.pidfile_held(self.path))
+
+    def test_a_stale_pidfile_is_not_held(self):
+        """A live pid in an unlocked file does not count."""
+        self.assertFalse(privsep.pidfile_held(self.path))
+
+    def test_a_missing_pidfile_is_not_held(self):
+        """No file reads as no process."""
+        self.assertFalse(privsep.pidfile_held(self.path + ".absent"))

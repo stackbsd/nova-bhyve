@@ -297,6 +297,12 @@ class DirectMachine(machine.Machine):
 
         directory = uuid_dir(uuid)
 
+        # a supervisor still exiting holds the pidfile the new one needs
+        if not self._wait_until_stopped(uuid, CONF.bhyve.destroy_timeout):
+            raise exception.MachineError(
+                uuid=uuid, reason="the previous supervisor has not exited"
+            )
+
         # vmm object left by a previous failure would make this start fail
         if self._vmm_present(uuid):
             LOG.warning(
@@ -358,12 +364,9 @@ class DirectMachine(machine.Machine):
         privsep.stop_domain(uuid_dir(uuid), uuid, graceful=True)
 
         # if a guest ignores ACPI, it will never stop so we must destroy
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if self.state(uuid)[0] != power_state.RUNNING:
-                LOG.info("%s stopped gracefully", uuid)
-                return
-            time.sleep(STOP_POLL)
+        if self._wait_until_stopped(uuid, timeout):
+            LOG.info("%s stopped gracefully", uuid)
+            return
         LOG.warning(
             "%(uuid)s did not stop within %(t)ss, destroying",
             {"uuid": uuid, "t": timeout},
@@ -375,13 +378,20 @@ class DirectMachine(machine.Machine):
         if self.state(uuid)[0] == power_state.RUNNING:
             LOG.info("destroying %s", uuid)
             privsep.stop_domain(uuid_dir(uuid), uuid, graceful=False)
-            deadline = time.time() + CONF.bhyve.destroy_timeout
-            while time.time() < deadline:
-                if self.state(uuid)[0] != power_state.RUNNING:
-                    break
-                time.sleep(STOP_POLL)
+        self._wait_until_stopped(uuid, CONF.bhyve.destroy_timeout)
         # remove the vmm object
         privsep.reap_vm(uuid)
+
+    def _wait_until_stopped(self, uuid, timeout):
+        """Wait for bhyve and its supervisor to exit."""
+        deadline = time.time() + timeout
+        while True:
+            if self.state(uuid)[0] != power_state.RUNNING:
+                if not privsep.supervisor_running(uuid_dir(uuid), uuid):
+                    return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(STOP_POLL)
 
     def undefine(self, uuid):
         """Remove an instance's definition and its UEFI variables."""
