@@ -36,6 +36,8 @@ You must configure `volmode=dev` on the dataset so that the host does not publis
 
 To remote attach cinder volumes, the nova host needs `iscsid` running and the os-brick-freebsd package installed.
 
+Set `resume_guests_state_on_host_boot = true` in `nova.conf` to start instances and log in to their iSCSI volumes again after a host reboot.
+
 ## Configuration
 
 Example configuration for Nova:

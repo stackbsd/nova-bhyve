@@ -3,6 +3,7 @@
 import contextlib
 import os
 
+import psutil
 from nova.compute import power_state
 from oslo_log import log as logging
 
@@ -84,8 +85,10 @@ class FakeMachine(direct.DirectMachine):
         """Return ``(power_state, reason)`` for an instance."""
         if self._read_spec(uuid) is None:
             return power_state.NOSTATE, "undefined"
-        if os.path.exists(running_path(uuid)):
-            return power_state.RUNNING, "fake marked running"
+        # a marker older than the boot was left by a host that went down
+        with contextlib.suppress(FileNotFoundError):
+            if os.path.getmtime(running_path(uuid)) >= psutil.boot_time():
+                return power_state.RUNNING, "fake marked running"
         return power_state.SHUTDOWN, "not running"
 
     def describe(self, uuid):
