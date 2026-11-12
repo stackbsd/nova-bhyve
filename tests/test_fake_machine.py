@@ -110,6 +110,14 @@ class FakeMachineTestCase(unittest.TestCase):
             stop()
             self.assertEqual(power_state.SHUTDOWN, self.machine.state(UUID)[0])
 
+    def test_marker_from_before_the_boot_is_not_running(self):
+        """An instance marked running before a host reboot is shut down."""
+        self.define()
+        self.machine.start(UUID)
+        later = os.path.getmtime(fake.running_path(UUID)) + 60
+        with mock.patch.object(fake.psutil, "boot_time", return_value=later):
+            self.assertEqual(power_state.SHUTDOWN, self.machine.state(UUID)[0])
+
     def test_running_instance_refuses_cold_attach(self):
         """The stopped-only attach rule is inherited."""
         self.define()
