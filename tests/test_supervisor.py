@@ -47,6 +47,10 @@ class SupervisorTestCase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.state_dir = self.tmp.name
         self.name = "11111111-2222-3333-4444-555555555555"
+        # keeps the lines under test off the test runner's stderr
+        quiet = supervisor.logging.NullHandler()
+        supervisor.LOG.addHandler(quiet)
+        self.addCleanup(supervisor.LOG.removeHandler, quiet)
 
     def _run(self, exit_statuses, stop_after=None):
         """Run the supervisor against a scripted list of child exit codes."""
@@ -102,6 +106,51 @@ class SupervisorTestCase(unittest.TestCase):
             [supervisor.EXIT_REBOOTED, supervisor.EXIT_POWEROFF]
         )
         self.assertEqual(2, reap.call_count)
+
+    def test_each_reset_is_logged_with_its_restart_count(self):
+        """Every reboot exit leaves a line carrying the exit code and count."""
+        with self.assertLogs(supervisor.LOG, "WARNING") as logs:
+            self._run([supervisor.EXIT_REBOOTED] * 2 + [supervisor.EXIT_POWEROFF])
+        self.assertEqual(
+            [
+                "guest reset (bhyve exit 0), restart 1",
+                "guest reset (bhyve exit 0), restart 2",
+            ],
+            [record.getMessage() for record in logs.records],
+        )
+
+    def test_a_log_line_starts_on_its_own_line_with_a_timestamp(self):
+        """The format cannot append to a partial line of guest output."""
+        record = supervisor.LOG.makeRecord(
+            supervisor.LOG.name, 30, __file__, 0, "guest reset", (), None
+        )
+        line = supervisor.logging.Formatter(supervisor.LOG_FORMAT).format(record)
+        self.assertRegex(line, r"^\n\d{4}-\d\d-\d\d \S+ supervisor: guest reset$")
+
+    def test_a_clean_stop_logs_nothing(self):
+        """Poweroff and halt exits leave no supervisor line."""
+        for status in (supervisor.EXIT_POWEROFF, supervisor.EXIT_HALTED):
+            with self.assertNoLogs(supervisor.LOG, "WARNING"):
+                self._run([status])
+
+    def test_abnormal_exits_are_logged_by_name_and_status(self):
+        """A triple fault, a signal and an error exit each leave a line."""
+        for status, expected in (
+            (supervisor.EXIT_TRIPLE_FAULT, "triple-fault (status 3)"),
+            (-signal.SIGABRT, "signal 6 (status -6)"),
+            (4, "exit 4 (status 4)"),
+        ):
+            with self.assertLogs(supervisor.LOG, "WARNING") as logs:
+                self._run([status])
+            self.assertEqual(
+                ["bhyve stopped abnormally: " + expected],
+                [record.getMessage() for record in logs.records],
+            )
+
+    def test_a_requested_stop_is_not_logged_as_abnormal(self):
+        """A guest killed by the driver's hard stop leaves no line."""
+        with self.assertNoLogs(supervisor.LOG, "WARNING"):
+            self._run([-signal.SIGKILL], stop_after=1)
 
     # Terminal exits: no respawn, and a truthful verdict.
 
@@ -213,7 +262,7 @@ class SupervisorArgumentTestCase(unittest.TestCase):
 
     def test_double_dash_is_stripped_from_the_bhyve_argv(self):
         """The "--" the caller passes does not reach bhyve's argv."""
-        with mock.patch.object(supervisor.Supervisor, "run", return_value=0):
+        with mock.patch.object(supervisor.logging, "basicConfig") as config:
             with mock.patch.object(supervisor, "Supervisor") as klass:
                 klass.return_value.run.return_value = 0
                 supervisor.main(
@@ -230,6 +279,9 @@ class SupervisorArgumentTestCase(unittest.TestCase):
                 )
         _args, _kwargs = klass.call_args
         self.assertEqual(["/usr/sbin/bhyve", "-c", "1"], klass.call_args[0][2])
+        config.assert_called_once_with(
+            stream=supervisor.sys.stderr, format=supervisor.LOG_FORMAT
+        )
 
     def test_no_bhyve_argv_is_an_error(self):
         """An empty bhyve command line exits with a usage error."""

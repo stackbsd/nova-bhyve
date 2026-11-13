@@ -2,6 +2,7 @@
 
 import argparse
 import errno
+import logging
 import os
 import signal
 import subprocess
@@ -16,6 +17,11 @@ EXIT_HALTED = 2
 EXIT_TRIPLE_FAULT = 3
 
 FILE_MODE = 0o644
+
+# stderr is the console log, so a line must not join the guest's last one
+LOG_FORMAT = "\n%(asctime)s supervisor: %(message)s"
+
+LOG = logging.getLogger(__name__)
 
 
 class Supervisor:
@@ -79,6 +85,11 @@ class Supervisor:
             reason = "rebooted"
         else:
             reason = "exit %d" % status
+        if not self.stopping and status not in (EXIT_POWEROFF, EXIT_HALTED):
+            LOG.warning(
+                "bhyve stopped abnormally: %(reason)s (status %(status)d)",
+                {"reason": reason, "status": status},
+            )
         self._write(self.statusfile, reason + "\n")
 
     def run(self):
@@ -93,6 +104,7 @@ class Supervisor:
             pass
 
         status = EXIT_POWEROFF
+        restarts = 0
         while True:
             self.child = subprocess.Popen(self.argv)
             self._write(self.pidfile, "%d\n" % self.child.pid)
@@ -111,6 +123,11 @@ class Supervisor:
             if status != EXIT_REBOOTED:
                 break
 
+            restarts += 1
+            LOG.warning(
+                "guest reset (bhyve exit %(status)d), restart %(count)d",
+                {"status": status, "count": restarts},
+            )
             self._reap()
 
         self._record_exit(status)
@@ -142,6 +159,7 @@ def main(argv=None):
     if not bhyve_argv:
         parser.error("no bhyve command line given")
 
+    logging.basicConfig(stream=sys.stderr, format=LOG_FORMAT)
     return Supervisor(args.state_dir, args.name, bhyve_argv).run()
 
 
