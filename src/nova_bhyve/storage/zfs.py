@@ -268,9 +268,7 @@ def rollback(dataset, name):
     """Roll a zvol back to one of its own snapshots (data and volsize)."""
     assert_under_root(dataset)
     full = "%s@%s" % (dataset, name)
-    LOG.info(
-        "rolling %(dataset)s back to %(snap)s", {"dataset": dataset, "snap": full}
-    )
+    LOG.info("rolling %(dataset)s back to %(snap)s", {"dataset": dataset, "snap": full})
     retry_while_busy(
         "rolling %s back" % dataset,
         functools.partial(run, "rollback", full, dataset=full),

@@ -3,9 +3,9 @@
 import time
 
 import nova.conf
-from nova.virt import imagecache
 from oslo_log import log as logging
 
+from nova.virt import imagecache
 from nova_bhyve import exception, images
 
 LOG = logging.getLogger(__name__)

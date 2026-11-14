@@ -12,7 +12,7 @@ from oslo_log import log as logging
 
 LOG = logging.getLogger(__name__)
 
-# TODO: these are defined in multiple places across the codebase. we should reuse from the main pkg
+# TODO: should these be reused from the main pkg?
 BHYVE = "/usr/sbin/bhyve"
 BHYVECTL = "/usr/sbin/bhyvectl"
 DAEMON = "/usr/sbin/daemon"
