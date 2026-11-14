@@ -70,6 +70,20 @@ class LifecycleWatcherTestCase(unittest.TestCase):
             self.poll(guest=state)
         self.emit.assert_not_called()
 
+    def test_crash_is_logged_once_with_its_reason(self):
+        """A confirmed crash leaves one warning naming how bhyve stopped."""
+        self.machine.state.side_effect = lambda uuid: (
+            self.states[uuid],
+            "guest stopped: triple-fault",
+        )
+        with self.assertLogs(lifecycle.__name__, "WARNING") as logs:
+            for state in (RUNNING, RUNNING, CRASHED, CRASHED, CRASHED):
+                self.poll(guest=state)
+        self.assertEqual(
+            ["%s crashed: guest stopped: triple-fault" % UUID],
+            [record.getMessage() for record in logs.records],
+        )
+
     def test_guests_are_tracked_separately(self):
         """Only the guest that stopped emits."""
         self.poll(guest=RUNNING, other=RUNNING)

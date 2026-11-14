@@ -43,11 +43,10 @@ class LifecycleWatcher:
 
     def poll(self):
         """Confirm states seen twice in a row and emit stops."""
-        observed = {
-            uuid: self.machine.state(uuid)[0] for uuid in self.machine.list_uuids()
-        }
+        states = {uuid: self.machine.state(uuid) for uuid in self.machine.list_uuids()}
+        observed = {uuid: state for uuid, (state, _reason) in states.items()}
         confirmed = {}
-        for uuid, state in observed.items():
+        for uuid, (state, reason) in states.items():
             previous = self.confirmed.get(uuid)
             if self.observed.get(uuid) != state:
                 if previous is not None:
@@ -58,6 +57,10 @@ class LifecycleWatcher:
                 LOG.info("%s stopped", uuid)
                 self.emit_event(
                     virtevent.LifecycleEvent(uuid, virtevent.EVENT_LIFECYCLE_STOPPED)
+                )
+            if previous == power_state.RUNNING and state == power_state.CRASHED:
+                LOG.warning(
+                    "%(uuid)s crashed: %(reason)s", {"uuid": uuid, "reason": reason}
                 )
         self.observed = observed
         self.confirmed = confirmed
