@@ -12,6 +12,6 @@ concurrency:
 
 jobs:
   unit:
-    uses: stackbsd/requirements/.github/workflows/unit.yml@main
+    uses: stackbsd/ci/.github/workflows/unit.yml@main
     with:
       packages: nova os-brick-freebsd
