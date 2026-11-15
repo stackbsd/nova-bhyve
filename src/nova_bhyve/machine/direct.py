@@ -275,7 +275,8 @@ class DirectMachine(machine.Machine):
             shutil.copyfile(CONF.bhyve.nvram_template, nvram)
 
         LOG.info(
-            "defining %(uuid)s (%(vcpus)s vcpu, %(mem)s MiB, root=%(root)s, iso=%(iso)s)",
+            "defining %(uuid)s (%(vcpus)s vcpu, %(mem)s MiB, root=%(root)s, "
+            "iso=%(iso)s)",
             {
                 "uuid": spec.uuid,
                 "vcpus": spec.vcpus,
@@ -410,8 +411,7 @@ class DirectMachine(machine.Machine):
         spec = self._require_stopped(uuid, "attach", "disk")
         if any(v.target_dev == disk.target_dev for v in spec.volumes):
             LOG.info(
-                "%(uuid)s already has a disk at "
-                "%(target)s, leaving it alone",
+                "%(uuid)s already has a disk at %(target)s, leaving it alone",
                 {"uuid": uuid, "target": disk.target_dev},
             )
             return

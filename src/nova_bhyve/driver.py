@@ -1166,7 +1166,7 @@ class BhyveDriver(driver.ComputeDriver):
 
     @unsupported
     def set_admin_password(self, *args, **kwargs):
-        """Setting the admin password on a running guest is unsupported."""
+        """Admin password changes on a running guest are unsupported."""
 
     @log_call
     def get_console_output(self, context, instance):

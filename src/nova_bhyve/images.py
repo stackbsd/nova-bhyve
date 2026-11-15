@@ -179,7 +179,8 @@ def inspect(path, image_meta):
         detected = str(inspector)
         if detected != declared:
             LOG.warning(
-                "%(id)s image content is %(detected)s but disk_format says %(declared)s",
+                "%(id)s image content is %(detected)s but disk_format says "
+                "%(declared)s",
                 {"id": image_id, "declared": declared, "detected": detected},
             )
             raise nova_exception.ImageUnacceptable(
@@ -284,7 +285,7 @@ def destroy_cache(image_id):
 
 
 def ensure_cached(context, image_meta, flavor_bytes=None):
-    """Populate the image cache if needed and return ``(base_snapshot, virtual_size)``."""
+    """Populate the image cache and return its base snapshot and size."""
     image_id = image_meta.id
     with lockutils.lock(LOCK_PREFIX + image_id, external=True):
         if is_cached(image_id):
@@ -330,8 +331,7 @@ def populate_raw(context, image_meta, flavor_bytes):
 
     LOG.debug("raw stream for %s", image_id)
     LOG.info(
-        "cache miss for %(id)s, streaming raw into %(dataset)s "
-        "(%(size)s bytes)",
+        "cache miss for %(id)s, streaming raw into %(dataset)s (%(size)s bytes)",
         {"id": image_id, "dataset": dataset, "size": virtual_size},
     )
     zfs.create_volume(dataset, virtual_size)
@@ -379,8 +379,7 @@ def populate_converted(context, image_meta, flavor_bytes):
         {"id": image_id, "fmt": declared},
     )
     LOG.info(
-        "cache miss for %(id)s, downloading %(fmt)s to %(spool)s "
-        "for conversion",
+        "cache miss for %(id)s, downloading %(fmt)s to %(spool)s for conversion",
         {"id": image_id, "fmt": declared, "spool": spool},
     )
 
